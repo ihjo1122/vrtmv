@@ -14,6 +14,7 @@ Android 앱에서 카메라 프리뷰 중 **사용자가 터치한 좌표의 객
 - **언어**: Kotlin
 - **UI**: Jetpack Compose + Material3
 - **아키텍처**: MVVM + Hilt DI (단일 모듈)
+- **네비게이션**: Jetpack Navigation Compose 2.8.5
 - **카메라**: CameraX 1.4.1 (Preview + ImageAnalysis 프레임 버퍼링)
 - **객체 검출**: MediaPipe Vision 0.10.20 (EfficientDet-Lite2, COCO 80 카테고리, threshold 0.3)
 - **VLM**: MediaPipe LLM Inference (온디바이스, tasks-genai 0.10.24) — Gemma 2B 등 지원
@@ -46,12 +47,22 @@ Android 앱에서 카메라 프리뷰 중 **사용자가 터치한 좌표의 객
 - viewModelScope.launch로 비동기 추론, 15초 타임아웃
 - Loading/Error 상태 UI (ResultCard, AR 태그)
 
+### 5단계: 인트로 + 메인 화면 ✅ 완료
+- **인트로 화면**: 앱 시작 시 "패치 사항 확인중..." 표시
+  - 모델 존재 시: "최신 상태입니다" → 4초 후 메인 화면 이동
+  - 모델 미존재 시: HuggingFace에서 자동 다운로드 (게이지바 + 퍼센트 표시)
+  - 다운로드 경로: `Download/vrtmv/gemma3-1b-it-int4.task`
+- **메인 화면**: AR Camera 버튼 → 기존 CameraScreen 실행
+- **네비게이션**: Jetpack Navigation Compose (Intro → Main → Camera)
+- **ModelDownloadManager**: Android DownloadManager 기반, 중복 다운로드 방지, 진행률 Flow
+
 ## 패키지 구조
 ```
 com.vrtmv.app/
 ├── di/InferenceModule.kt              # Hilt DI (@Named mock/cloud)
 ├── data/
 │   ├── detection/ObjectDetectionManager.kt  # MediaPipe 래퍼 (온디맨드)
+│   ├── download/ModelDownloadManager.kt     # 모델 자동 다운로드 (DownloadManager)
 │   └── inference/
 │       ├── InferenceEngine.kt         # 인터페이스
 │       ├── MockInferenceEngine.kt     # 더미 (라벨만 반환)
@@ -61,9 +72,14 @@ com.vrtmv.app/
 ├── domain/model/
 │   ├── DetectedObject.kt             # boundingBox, label, confidence
 │   └── InferenceState.kt             # Idle, Loading, Success, Error, ModelUnavailable
+├── navigation/AppNavHost.kt           # Intro → Main → Camera 네비게이션
 ├── ui/
+│   ├── intro/
+│   │   ├── IntroScreen.kt            # 인트로 화면 (패치 확인 + 다운로드)
+│   │   └── IntroViewModel.kt         # 모델 존재 확인 + 다운로드 관리
+│   ├── main/MainScreen.kt            # 메인 화면 (AR Camera 버튼)
 │   ├── camera/
-│   │   ├── CameraScreen.kt           # 메인 화면 (5개 레이어) + VlmToggleButton
+│   │   ├── CameraScreen.kt           # AR 카메라 화면 (5개 레이어) + VlmToggleButton
 │   │   └── CameraViewModel.kt        # 터치→검출→선택→VLM추론 총괄
 │   ├── overlay/
 │   │   ├── DetectionOverlay.kt        # AR 바운딩박스 + 플로팅 태그
@@ -76,6 +92,17 @@ com.vrtmv.app/
 │   └── RoiCropper.kt                 # 바운딩박스 크롭 (15% 패딩)
 ├── MainActivity.kt
 └── VrtmvApplication.kt
+```
+
+## 앱 흐름
+```
+앱 시작 → IntroScreen
+  → "패치 사항 확인중..." (ModelDownloadManager.modelExists())
+  → 모델 있음: "최신 상태입니다" → 4초 대기 → MainScreen
+  → 모델 없음: DownloadManager로 다운로드 (게이지바) → 완료 → MainScreen
+
+MainScreen
+  → AR Camera 버튼 클릭 → CameraScreen (기존 기능)
 ```
 
 ## 주요 데이터 흐름
@@ -115,10 +142,15 @@ VLM 추론 (모드가 OFF가 아닐 때)
 HuggingFace에서 `gemma3-1b-it-int4.task` 다운로드:
 https://huggingface.co/litert-community/Gemma3-1B-IT
 
-### 기기 배치 (자동)
-1. `.task` 파일을 기기의 **Download 폴더**에 넣기 (USB 연결 또는 브라우저 다운로드)
-2. 앱이 자동으로 Download 폴더에서 `.task` 파일을 탐색
-3. 발견 시 앱 내부 저장소로 복사 후 사용
+### 모델 배치 (자동 다운로드)
+1. 앱 첫 실행 시 인트로 화면에서 **자동 다운로드** (`Download/vrtmv/gemma3-1b-it-int4.task`)
+2. 이미 해당 경로 또는 내부 저장소에 모델이 있으면 다운로드 스킵
+3. VLM 사용 시 앱 내부 저장소(`files/model.task`)로 자동 복사
+
+### 모델 탐색 우선순위 (GeminiNanoEngine)
+1. 앱 내부 저장소 `files/model.task`
+2. `Download/vrtmv/gemma3-1b-it-int4.task` (자동 다운로드 경로)
+3. Download 루트 폴더에서 `.task` 파일 스캔 (폴백)
 
 모델 파일이 없으면 VLM ON 시 안내 메시지 표시.
 
@@ -127,3 +159,7 @@ https://huggingface.co/litert-community/Gemma3-1B-IT
 ./gradlew :app:assembleDebug
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
+
+## 문서 관리 규칙
+- **코드 변경 시 이 문서를 반드시 동기화할 것**: 새 파일/패키지 추가, 기술 스택 변경, 데이터 흐름 변경, 개발 단계 진행 등 구조적 변경이 발생하면 해당 섹션을 즉시 업데이트한다.
+- **문서가 200줄을 초과하면 분할**: 핵심 정보는 `CLAUDE.md`에 유지하고, 상세 내용은 `docs/` 폴더 하위 문서로 분리한 뒤 링크로 연결한다.

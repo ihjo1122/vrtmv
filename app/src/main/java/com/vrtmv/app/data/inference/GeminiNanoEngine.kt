@@ -46,7 +46,7 @@ class GeminiNanoEngine @Inject constructor(
         val internalModel = File(context.filesDir, MODEL_FILENAME)
         if (internalModel.exists()) return internalModel.absolutePath
 
-        // 2순위: Download 폴더에서 .task 파일 탐색
+        // 2순위: Download/vrtmv/ 폴더의 정확한 경로 확인
         return withContext(Dispatchers.IO) {
             try {
                 val downloadDir = Environment.getExternalStoragePublicDirectory(
@@ -54,9 +54,18 @@ class GeminiNanoEngine @Inject constructor(
                 )
                 if (!downloadDir.exists()) return@withContext null
 
-                // .task 파일 중 가장 큰 것 선택 (LLM 모델은 보통 수백MB 이상)
+                // Download/vrtmv/gemma3-1b-it-int4.task 확인
+                val vrtmvModel = File(downloadDir, "vrtmv/gemma3-1b-it-int4.task")
+                if (vrtmvModel.exists() && vrtmvModel.length() > 100_000_000) {
+                    Log.d(TAG, "Download/vrtmv에서 모델 발견: ${vrtmvModel.length() / 1024 / 1024}MB")
+                    vrtmvModel.copyTo(internalModel, overwrite = true)
+                    Log.d(TAG, "모델을 앱 내부 저장소로 복사 완료")
+                    return@withContext internalModel.absolutePath
+                }
+
+                // 3순위: Download 루트 폴더에서 .task 파일 탐색 (폴백)
                 val taskFile = downloadDir.listFiles()
-                    ?.filter { it.extension == "task" && it.length() > 100_000_000 } // 100MB 이상
+                    ?.filter { it.extension == "task" && it.length() > 100_000_000 }
                     ?.maxByOrNull { it.length() }
 
                 if (taskFile != null) {
