@@ -11,14 +11,19 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
@@ -49,8 +54,6 @@ import com.vrtmv.app.data.inference.VlmMode
 import com.vrtmv.app.ui.overlay.DetectionOverlay
 import com.vrtmv.app.ui.overlay.GazeCrosshair
 import com.vrtmv.app.ui.components.ResultCard
-import com.vrtmv.app.util.CoordinateMapper
-
 @Composable
 fun CameraScreen(
     viewModel: CameraViewModel = hiltViewModel()
@@ -99,6 +102,7 @@ private fun CameraContent(viewModel: CameraViewModel) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val uiState by viewModel.uiState.collectAsState()
+    val modelLoading by viewModel.modelLoading.collectAsState()
 
     var viewSize by remember { mutableStateOf(androidx.compose.ui.geometry.Size.Zero) }
 
@@ -108,18 +112,8 @@ private fun CameraContent(viewModel: CameraViewModel) {
         onDispose { detectionManager.close() }
     }
 
-    val coordinateMapper = remember(
-        uiState.imageWidth, uiState.imageHeight, viewSize
-    ) {
-        if (uiState.imageWidth > 0 && viewSize.width > 0f) {
-            CoordinateMapper(
-                imageWidth = uiState.imageWidth,
-                imageHeight = uiState.imageHeight,
-                viewWidth = viewSize.width,
-                viewHeight = viewSize.height
-            )
-        } else null
-    }
+    // CoordinateMapper는 ViewModel에서 생성하여 UiState에 포함 (이중 생성 방지)
+    val coordinateMapper = uiState.coordinateMapper
 
     Box(
         modifier = Modifier
@@ -226,6 +220,64 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 .align(Alignment.TopEnd)
                 .padding(top = 48.dp, end = 16.dp)
         )
+
+        // Layer 6: 모델명 + 추론 시간 (top-left)
+        if (uiState.modelDisplayName.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(top = 48.dp, start = 16.dp)
+                    .background(
+                        Color.Black.copy(alpha = 0.6f),
+                        RoundedCornerShape(8.dp)
+                    )
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = uiState.modelDisplayName,
+                    color = Color(0xFF00BCD4),
+                    fontSize = 11.sp
+                )
+                if (uiState.inferenceTimeMs > 0) {
+                    Text(
+                        text = "${uiState.inferenceTimeMs}ms",
+                        color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        }
+
+        // Layer 7: 모델 로딩 스피너
+        if (modelLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.7f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(
+                        color = Color(0xFF00BCD4),
+                        modifier = Modifier.size(48.dp)
+                    )
+                    Text(
+                        text = "모델 초기화 중...",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(top = 16.dp)
+                    )
+                    Text(
+                        text = uiState.modelDisplayName,
+                        color = Color(0xFF00BCD4),
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
+            }
+        }
     }
 }
 

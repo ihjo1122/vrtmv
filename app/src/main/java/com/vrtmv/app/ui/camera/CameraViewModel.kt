@@ -1,6 +1,7 @@
 package com.vrtmv.app.ui.camera
 
 import android.graphics.Bitmap
+import android.util.Log
 import androidx.compose.ui.geometry.Offset
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -12,6 +13,9 @@ import com.vrtmv.app.domain.model.InferenceState
 import com.vrtmv.app.util.CoordinateMapper
 import com.vrtmv.app.util.GazeTargetResolver
 import com.vrtmv.app.util.RoiCropper
+import androidx.lifecycle.SavedStateHandle
+import com.vrtmv.app.data.inference.GeminiNanoEngine
+import com.vrtmv.app.domain.model.ModelRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,7 +37,10 @@ data class CameraUiState(
     val capturedBitmap: Bitmap? = null,
     val imageWidth: Int = 0,
     val imageHeight: Int = 0,
-    val vlmMode: VlmMode = VlmMode.OFF
+    val vlmMode: VlmMode = VlmMode.OFF,
+    val coordinateMapper: CoordinateMapper? = null,
+    val modelDisplayName: String = "",
+    val inferenceTimeMs: Long = 0L
 )
 
 /**
@@ -42,13 +49,42 @@ data class CameraUiState(
  */
 @HiltViewModel
 class CameraViewModel @Inject constructor(
-    private val inferenceEngine: InferenceEngine  // Hilt에 의해 GeminiNanoEngine 주입
+    private val inferenceEngine: InferenceEngine,
+    savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(CameraUiState())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
 
-    private var inferenceJob: Job? = null  // 현재 실행 중인 추론 코루틴
+    private var inferenceJob: Job? = null
+
+    /** 모델 로딩 완료 여부 */
+    private val _modelLoading = MutableStateFlow(true)
+    val modelLoading: StateFlow<Boolean> = _modelLoading.asStateFlow()
+
+    companion object {
+        private const val TAG = "CameraVM"
+    }
+
+    init {
+        // Navigation argument에서 modelId 읽기
+        val modelId = savedStateHandle.get<String>("modelId") ?: ModelRegistry.DEFAULT_MODEL_ID
+        val modelInfo = ModelRegistry.getModel(modelId) ?: ModelRegistry.getDefaultModel()
+
+        _uiState.value = _uiState.value.copy(modelDisplayName = modelInfo.displayName)
+
+        // 모델 로드 (5-15초 소요 가능)
+        viewModelScope.launch {
+            Log.d(TAG, "모델 로드 시작: ${modelInfo.displayName}")
+            val engine = inferenceEngine as? GeminiNanoEngine
+            val success = engine?.loadModel(modelInfo) ?: true
+            if (!success) {
+                Log.w(TAG, "모델 로드 실패: ${modelInfo.displayName}")
+            }
+            _modelLoading.value = false
+            Log.d(TAG, "모델 로드 완료: ${modelInfo.displayName}, success=$success")
+        }
+    }
 
     /** VLM 모드 토글 (OFF ↔ ON) */
     fun toggleVlmMode() {
@@ -70,7 +106,16 @@ class CameraViewModel @Inject constructor(
     ) {
         inferenceJob?.cancel()
 
-        val result = detectionManager.detectNow() ?: return
+        val result = detectionManager.detectNow() ?: run {
+            Log.w(TAG, "▶ detectNow() 반환 null — 프레임 없음")
+            return
+        }
+
+        Log.d(TAG, "════════════════════════════════════════")
+        Log.d(TAG, "▶ TAP: (${tapPoint.x}, ${tapPoint.y})")
+        Log.d(TAG, "▶ VIEW: ${viewWidth} x ${viewHeight}")
+        Log.d(TAG, "▶ IMAGE: ${result.imageWidth} x ${result.imageHeight}")
+        Log.d(TAG, "▶ 검출 객체: ${result.objects.size}개")
 
         val mapper = CoordinateMapper(
             imageWidth = result.imageWidth,
@@ -79,22 +124,36 @@ class CameraViewModel @Inject constructor(
             viewHeight = viewHeight
         )
 
+        // 좌표 매핑 디버그 로그
+        Log.d(TAG, "▶ MAPPER: scale=${mapper.debugScale()}, offset=(${mapper.debugOffsetX()}, ${mapper.debugOffsetY()})")
+
+        result.objects.forEachIndexed { i, obj ->
+            val viewRect = mapper.mapToView(obj.boundingBox)
+            Log.d(TAG, "  [$i] ${obj.label}(${(obj.confidence * 100).toInt()}%)" +
+                " img=(${obj.boundingBox.left.toInt()},${obj.boundingBox.top.toInt()},${obj.boundingBox.right.toInt()},${obj.boundingBox.bottom.toInt()})" +
+                " → view=(${viewRect.left.toInt()},${viewRect.top.toInt()},${viewRect.right.toInt()},${viewRect.bottom.toInt()})" +
+                " contains=${viewRect.contains(tapPoint)}")
+        }
+
         val selected = GazeTargetResolver.resolve(
             gazePoint = tapPoint,
             detectedObjects = result.objects,
             coordinateMapper = mapper
         )
 
+        Log.d(TAG, "▶ SELECTED: ${selected?.label ?: "없음"}")
+        Log.d(TAG, "════════════════════════════════════════")
+
         _uiState.value.capturedBitmap?.recycle()
 
-        _uiState.value = CameraUiState(
+        _uiState.value = _uiState.value.copy(
             detectedObjects = result.objects,
             selectedObject = selected,
             tapPoint = tapPoint,
             capturedBitmap = result.bitmap,
             imageWidth = result.imageWidth,
             imageHeight = result.imageHeight,
-            vlmMode = _uiState.value.vlmMode,
+            coordinateMapper = mapper,
             inferenceState = if (selected != null) {
                 InferenceState.Success(
                     "${selected.label} (${(selected.confidence * 100).toInt()}%)"
@@ -122,14 +181,18 @@ class CameraViewModel @Inject constructor(
             try {
                 val cropped = RoiCropper.crop(bitmap, obj.boundingBox)
 
+                val startTime = System.currentTimeMillis()
                 val description = withTimeout(15_000) {
                     inferenceEngine.describe(cropped, obj.label, obj.confidence)
                 }
+                val elapsed = System.currentTimeMillis() - startTime
 
                 cropped.recycle()
+                Log.d(TAG, "▶ 추론 완료: ${elapsed}ms")
 
                 _uiState.value = _uiState.value.copy(
-                    inferenceState = InferenceState.Success(description)
+                    inferenceState = InferenceState.Success(description),
+                    inferenceTimeMs = elapsed
                 )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(

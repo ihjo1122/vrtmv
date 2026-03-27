@@ -1,5 +1,9 @@
 # VRTMV - Gaze-Guided On-Device VLM for Real-Time Mobile Visual Understanding
 
+## 응답 언어
+- **모든 응답은 한국어로 작성할 것.** gstack 스킬 실행 시에도 한국어로 출력한다.
+- 코드, 명령어, 파일명 등 기술적 용어는 원문 그대로 유지하되, 설명과 질문은 한국어로 한다.
+
 ## 프로젝트 개요
 터치 기반 관심 영역 선택 + VLM을 결합한 모바일 시각 이해 시스템.
 Android 앱에서 카메라 프리뷰 중 **사용자가 터치한 좌표의 객체를 탐지**하고, 해당 객체를 크롭하여 AI 설명을 생성, AR 오버레이로 표시한다.
@@ -56,6 +60,19 @@ Android 앱에서 카메라 프리뷰 중 **사용자가 터치한 좌표의 객
 - **네비게이션**: Jetpack Navigation Compose (Intro → Main → Camera)
 - **ModelDownloadManager**: Android DownloadManager 기반, 중복 다운로드 방지, 진행률 Flow
 
+### 6단계: 모델 비교 + 폴리싱 🔧 진행중
+- **멀티 모델 지원**: ModelInfo + ModelRegistry로 모델 목록 중앙 관리
+- **모델별 AR Camera 버튼**: MainScreen에서 모델별 버튼 (INT4/INT8)
+- **모델 자동 다운로드**: 미다운로드 모델 클릭 시 MainScreen에서 다이얼로그로 다운로드
+- **GeminiNanoEngine 파라미터화**: loadModel(modelInfo) + 모델별 내부 경로 분리 + mutex
+- **좌표 디버그 로깅**: CameraViewModel에서 터치→매핑→검출 좌표 전체 로그 출력
+- **CoordinateMapper 통합**: ViewModel에서만 생성, CameraScreen 이중 생성 제거
+- **추론 시간 표시**: CameraScreen 좌상단에 모델명 + 추론 시간(ms)
+- **모델 초기화 로딩**: CameraScreen 진입 시 로딩 스피너 (5-15초)
+- **저장공간 체크**: 다운로드 전 StatFs로 가용 공간 확인
+- **DownloadProgressUI**: IntroScreen/MainScreen 공통 다운로드 진행률 컴포넌트
+- **Navigation**: camera/{modelId} 라우트 + SavedStateHandle로 ViewModel에 전달
+
 ## 패키지 구조
 ```
 com.vrtmv.app/
@@ -71,20 +88,26 @@ com.vrtmv.app/
 │       └── VlmMode.kt                # OFF / ON enum
 ├── domain/model/
 │   ├── DetectedObject.kt             # boundingBox, label, confidence
-│   └── InferenceState.kt             # Idle, Loading, Success, Error, ModelUnavailable
-├── navigation/AppNavHost.kt           # Intro → Main → Camera 네비게이션
+│   ├── InferenceState.kt             # Idle, Loading, Success, Error, ModelUnavailable
+│   ├── ModelInfo.kt                  # 모델 정보 데이터 클래스 (id, url, quantization 등)
+│   └── ModelRegistry.kt              # 사용 가능한 모델 목록 중앙 관리
+├── navigation/AppNavHost.kt           # Intro → Main → Camera/{modelId} 네비게이션
 ├── ui/
 │   ├── intro/
 │   │   ├── IntroScreen.kt            # 인트로 화면 (패치 확인 + 다운로드)
 │   │   └── IntroViewModel.kt         # 모델 존재 확인 + 다운로드 관리
-│   ├── main/MainScreen.kt            # 메인 화면 (AR Camera 버튼)
+│   ├── main/
+│   │   ├── MainScreen.kt             # 메인 화면 (모델별 AR Camera 버튼)
+│   │   └── MainViewModel.kt          # 모델 다운로드 상태 관리
 │   ├── camera/
-│   │   ├── CameraScreen.kt           # AR 카메라 화면 (5개 레이어) + VlmToggleButton
-│   │   └── CameraViewModel.kt        # 터치→검출→선택→VLM추론 총괄
+│   │   ├── CameraScreen.kt           # AR 카메라 화면 (7개 레이어) + 모델명/추론시간 표시
+│   │   └── CameraViewModel.kt        # 터치→검출→선택→VLM추론 + 모델 로드
 │   ├── overlay/
 │   │   ├── DetectionOverlay.kt        # AR 바운딩박스 + 플로팅 태그
 │   │   └── GazeCrosshair.kt          # 터치 포인트 표시
-│   ├── components/ResultCard.kt       # 하단 힌트/로딩/에러 카드
+│   ├── components/
+│   │   ├── ResultCard.kt             # 하단 힌트/로딩/에러 카드
+│   │   └── DownloadProgressUI.kt     # 공통 다운로드 진행률 컴포넌트
 │   └── theme/Theme.kt                # Material3 다이나믹 컬러
 ├── util/
 │   ├── CoordinateMapper.kt           # 이미지↔화면 좌표 변환
@@ -159,6 +182,21 @@ https://huggingface.co/litert-community/Gemma3-1B-IT
 ./gradlew :app:assembleDebug
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
+
+## gstack (글로벌 스킬)
+- **설치 경로**: `~/.claude/skills/gstack` (모든 OS에서 `$HOME/.claude/skills/gstack`)
+- **다른 PC 설치**: `git clone --depth 1 https://github.com/garrytan/gstack.git ~/.claude/skills/gstack`
+- **웹 브라우징**: `/browse` 스킬 사용, `mcp__claude-in-chrome__*` 도구 사용 금지
+- **스킬 미작동 시**: `cd ~/.claude/skills/gstack && ./setup` 실행
+- **사용 가능한 스킬**:
+  - 기획: `/office-hours`, `/plan-ceo-review`, `/plan-eng-review`, `/plan-design-review`
+  - 디자인: `/design-consultation`, `/design-review`
+  - 개발: `/review`, `/ship`, `/land-and-deploy`, `/canary`
+  - 품질: `/qa`, `/qa-only`, `/benchmark`, `/cso` (보안 감사)
+  - 운영: `/setup-deploy`, `/retro`, `/investigate`, `/document-release`
+  - 브라우저: `/browse`, `/setup-browser-cookies`
+  - 안전: `/careful`, `/freeze`, `/guard`, `/unfreeze`
+  - 기타: `/codex`, `/autoplan`, `/gstack-upgrade`
 
 ## 문서 관리 규칙
 - **코드 변경 시 이 문서를 반드시 동기화할 것**: 새 파일/패키지 추가, 기술 스택 변경, 데이터 흐름 변경, 개발 단계 진행 등 구조적 변경이 발생하면 해당 섹션을 즉시 업데이트한다.

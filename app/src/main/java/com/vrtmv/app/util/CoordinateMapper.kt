@@ -64,4 +64,9 @@ class CoordinateMapper(
 
     /** 화면 뷰 크기 반환 */
     fun getViewSize(): Size = Size(viewWidth, viewHeight)
+
+    // 디버그용 접근자
+    fun debugScale(): Float = scale
+    fun debugOffsetX(): Float = offsetX
+    fun debugOffsetY(): Float = offsetY
 }
