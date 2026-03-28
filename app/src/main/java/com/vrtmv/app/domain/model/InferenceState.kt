@@ -16,7 +16,4 @@ sealed class InferenceState {
 
     /** 추론 실패 — 에러 메시지 포함 */
     data class Error(val message: String?) : InferenceState()
-
-    /** 모델을 사용할 수 없는 기기 */
-    data object ModelUnavailable : InferenceState()
 }

@@ -3,7 +3,6 @@ package com.vrtmv.app.util
 import android.graphics.RectF
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.Size
 
 /**
  * 이미지 좌표 ↔ 화면 좌표 변환기.
@@ -61,9 +60,6 @@ class CoordinateMapper(
             y = (viewOffset.y - offsetY) / scale
         )
     }
-
-    /** 화면 뷰 크기 반환 */
-    fun getViewSize(): Size = Size(viewWidth, viewHeight)
 
     // 디버그용 접근자
     fun debugScale(): Float = scale

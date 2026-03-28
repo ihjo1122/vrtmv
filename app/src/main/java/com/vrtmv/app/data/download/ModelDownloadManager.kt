@@ -9,6 +9,7 @@ import android.os.StatFs
 import android.util.Log
 import com.vrtmv.app.domain.model.ModelInfo
 import com.vrtmv.app.domain.model.ModelRegistry
+import com.vrtmv.app.util.ModelPathResolver
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -16,22 +17,21 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
-import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
  * 멀티 모델 다운로드 관리자.
- * Android DownloadManager를 사용하여 HuggingFace에서 .task 모델을 다운로드한다.
+ * Android DownloadManager를 사용하여 모델을 다운로드한다.
  * 다운로드 경로: Download/vrtmv/{fileName}
  */
 @Singleton
 class ModelDownloadManager @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val pathResolver: com.vrtmv.app.util.ModelPathResolver
 ) {
     companion object {
         private const val TAG = "ModelDownload"
-        const val MODEL_SUBDIR = "vrtmv"
     }
 
     private val downloadManager =
@@ -45,45 +45,11 @@ class ModelDownloadManager @Inject constructor(
     /** 기본 모델 다운로드 시작 */
     fun startDownload(): Long = startDownload(ModelRegistry.getDefaultModel())
 
-    /** 기존 기본 모델 다운로드 진행 중 확인 */
-    fun findExistingDownload(): Long? = findExistingDownload(ModelRegistry.getDefaultModel())
-
     // ── 멀티 모델 지원 ──────────────────────────────────────────
 
-    /**
-     * 지정 모델 파일이 존재하는지 확인.
-     * 확인 순서:
-     * 1. 앱 내부 저장소 (files/{modelId}.task)
-     * 2. Download/vrtmv/{fileName}
-     */
+    /** 지정 모델 파일이 존재하는지 확인 (ModelPathResolver에 위임). */
     suspend fun modelExists(modelInfo: ModelInfo): Boolean = withContext(Dispatchers.IO) {
-        // 1. 내부 저장소 (모델별 경로)
-        val internalModel = File(context.filesDir, "${modelInfo.id}.task")
-        if (internalModel.exists() && internalModel.length() > 100_000_000) {
-            Log.d(TAG, "내부 저장소에 모델 존재: ${modelInfo.id}")
-            return@withContext true
-        }
-
-        // 기존 단일 경로 호환 (기본 모델인 경우 files/model.task도 체크)
-        if (modelInfo.id == ModelRegistry.DEFAULT_MODEL_ID) {
-            val legacyModel = File(context.filesDir, "model.task")
-            if (legacyModel.exists() && legacyModel.length() > 100_000_000) {
-                Log.d(TAG, "레거시 경로에 기본 모델 존재")
-                return@withContext true
-            }
-        }
-
-        // 2. Download/vrtmv/{fileName}
-        val downloadModel = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            "$MODEL_SUBDIR/${modelInfo.fileName}"
-        )
-        if (downloadModel.exists() && downloadModel.length() > 100_000_000) {
-            Log.d(TAG, "Download/vrtmv에 모델 존재: ${modelInfo.fileName}")
-            return@withContext true
-        }
-
-        false
+        pathResolver.modelExists(modelInfo)
     }
 
     /** 지정 모델의 진행 중인 다운로드 확인 */
@@ -110,6 +76,11 @@ class ModelDownloadManager @Inject constructor(
      * @throws InsufficientStorageException 저장공간 부족 시
      */
     fun startDownload(modelInfo: ModelInfo): Long {
+        // 다운로드 URL이 비어있으면 수동 배치 모델
+        if (modelInfo.downloadUrl.isBlank()) {
+            throw ManualInstallRequiredException(modelInfo)
+        }
+
         // 기존 진행 중인 다운로드가 있으면 그대로 사용
         findExistingDownload(modelInfo)?.let { return it }
 
@@ -131,7 +102,7 @@ class ModelDownloadManager @Inject constructor(
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
             .setDestinationInExternalPublicDir(
                 Environment.DIRECTORY_DOWNLOADS,
-                "$MODEL_SUBDIR/${modelInfo.fileName}"
+                "${ModelPathResolver.MODEL_SUBDIR}/${modelInfo.fileName}"
             )
             .setAllowedOverMetered(true)
             .setAllowedOverRoaming(false)
@@ -181,6 +152,11 @@ class ModelDownloadManager @Inject constructor(
         return DownloadProgress(0, -1, DownloadManager.STATUS_FAILED, 0)
     }
 }
+
+/** 수동 배치 필요 예외 (downloadUrl이 비어있는 모델) */
+class ManualInstallRequiredException(
+    val modelInfo: ModelInfo
+) : Exception("수동 설치 필요: adb push ${modelInfo.fileName} /sdcard/Download/vrtmv/")
 
 /** 저장공간 부족 예외 */
 class InsufficientStorageException(

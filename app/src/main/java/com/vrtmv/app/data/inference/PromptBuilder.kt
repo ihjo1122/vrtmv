@@ -8,18 +8,19 @@ package com.vrtmv.app.data.inference
 object PromptBuilder {
 
     /**
-     * 객체 설명 요청 프롬프트를 생성한다.
-     *
-     * @param label 검출된 객체 라벨
-     * @param confidence 검출 신뢰도 (0.0 ~ 1.0)
-     * @return LLM에 전달할 프롬프트 문자열
+     * 멀티모달 비전 추론용 프롬프트를 생성한다.
+     * 이미지가 함께 전달되므로 이미지를 보고 설명하도록 요청.
      */
-    fun buildDescriptionPrompt(label: String, confidence: Float): String {
+    fun buildVisionPrompt(label: String, confidence: Float): String {
         val pct = (confidence * 100).toInt()
         return """
-            You are looking at an object detected as "$label" with $pct% confidence.
-            Describe this object in one concise sentence in Korean.
-            Focus on what it is, its appearance, and any notable features visible in the image.
+            이 이미지에서 "$label"(${pct}% 확률)로 감지된 객체가 보입니다.
+            이미지를 보고 이 객체가 무엇인지 한국어로 간결하게 1~2문장으로 설명해주세요.
         """.trimIndent()
+    }
+
+    /** 전체 장면 설명용 프롬프트. 객체 미검출 시 사용. */
+    fun buildScenePrompt(): String {
+        return "이 이미지에 보이는 장면을 한국어로 간결하게 1~2문장으로 설명해주세요."
     }
 }

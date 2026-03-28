@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vrtmv.app.data.download.DownloadProgress
 import com.vrtmv.app.data.download.InsufficientStorageException
+import com.vrtmv.app.data.download.ManualInstallRequiredException
 import com.vrtmv.app.data.download.ModelDownloadManager
 import com.vrtmv.app.domain.model.ModelInfo
 import com.vrtmv.app.domain.model.ModelRegistry
@@ -77,6 +78,10 @@ class MainViewModel @Inject constructor(
                     }
                 }
             }
+        } catch (e: ManualInstallRequiredException) {
+            _downloadState.value = MainDownloadState.Error(
+                "수동 설치가 필요한 모델입니다.\nadb push ${e.modelInfo.fileName} /sdcard/Download/vrtmv/"
+            )
         } catch (e: InsufficientStorageException) {
             _downloadState.value = MainDownloadState.Error(
                 "저장공간 부족: ${e.required}MB 필요, ${e.available}MB 사용 가능"

@@ -34,6 +34,7 @@ class ObjectDetectionManager(private val context: Context) {
 
     private var detector: ObjectDetector? = null  // MediaPipe 검출기 인스턴스
     private var latestBitmap: Bitmap? = null       // 최신 프레임 버퍼 (upright)
+    private val bitmapLock = Any()                 // latestBitmap 동기화 락
 
     init {
         setupDetector()
@@ -81,9 +82,11 @@ class ObjectDetectionManager(private val context: Context) {
                 rawBitmap
             }
 
-            // 이전 프레임 해제 후 새 프레임 저장
-            latestBitmap?.recycle()
-            latestBitmap = upright
+            // 이전 프레임 해제 후 새 프레임 저장 (동기화)
+            synchronized(bitmapLock) {
+                latestBitmap?.recycle()
+                latestBitmap = upright
+            }
         } catch (e: Exception) {
             Log.e(TAG, "프레임 업데이트 실패", e)
         } finally {
@@ -112,12 +115,15 @@ class ObjectDetectionManager(private val context: Context) {
      * @return 검출 결과, 또는 프레임/검출기가 없으면 null
      */
     fun detectNow(): DetectionResult? {
-        val bitmap = latestBitmap ?: return null
         val det = detector ?: return null
 
+        // 동기화 블록 내에서 복사본 생성 (원본 recycle 방지)
+        val frameCopy = synchronized(bitmapLock) {
+            val bitmap = latestBitmap ?: return null
+            bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
+        }
+
         return try {
-            // 원본 보존을 위해 복사본에서 검출 실행
-            val frameCopy = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
             val mpImage = BitmapImageBuilder(frameCopy).build()
             val result = det.detect(mpImage)
 
@@ -184,7 +190,9 @@ class ObjectDetectionManager(private val context: Context) {
     fun close() {
         detector?.close()
         detector = null
-        latestBitmap?.recycle()
-        latestBitmap = null
+        synchronized(bitmapLock) {
+            latestBitmap?.recycle()
+            latestBitmap = null
+        }
     }
 }

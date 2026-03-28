@@ -17,4 +17,8 @@ data class ModelInfo(
     val downloadUrl: String,
     val quantization: String,
     val expectedSizeMB: Int
-)
+) {
+    /** 파일 확장자 (.litertlm 등) */
+    val fileExtension: String
+        get() = fileName.substringAfterLast('.', "litertlm")
+}

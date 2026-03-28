@@ -43,6 +43,7 @@ fun DetectionOverlay(
     selectedObject: DetectedObject?,
     inferenceState: InferenceState = InferenceState.Idle,
     coordinateMapper: CoordinateMapper,
+    tapPoint: Offset? = null,
     modifier: Modifier = Modifier
 ) {
     val textMeasurer = rememberTextMeasurer()
@@ -98,6 +99,19 @@ fun DetectionOverlay(
                 )
             }
         }
+
+        // 객체 미선택 + 터치 좌표 있을 때 → 터치 위치에 장면 AR 태그
+        if (selectedObject == null && tapPoint != null &&
+            inferenceState !is InferenceState.Idle
+        ) {
+            drawSceneTag(
+                tapX = tapPoint.x,
+                tapY = tapPoint.y,
+                cornerPulse = cornerPulse,
+                inferenceState = inferenceState,
+                textMeasurer = textMeasurer
+            )
+        }
     }
 }
 
@@ -136,19 +150,7 @@ private fun DrawScope.drawSelectedObject(
     )
 
     // Corner brackets (AR targeting style)
-    val c = AccentCyan.copy(alpha = cornerPulse)
-    // Top-left
-    drawLine(c, Offset(left, top), Offset(left + cornerLen, top), strokeW)
-    drawLine(c, Offset(left, top), Offset(left, top + cornerLen), strokeW)
-    // Top-right
-    drawLine(c, Offset(left + width, top), Offset(left + width - cornerLen, top), strokeW)
-    drawLine(c, Offset(left + width, top), Offset(left + width, top + cornerLen), strokeW)
-    // Bottom-left
-    drawLine(c, Offset(left, top + height), Offset(left + cornerLen, top + height), strokeW)
-    drawLine(c, Offset(left, top + height), Offset(left, top + height - cornerLen), strokeW)
-    // Bottom-right
-    drawLine(c, Offset(left + width, top + height), Offset(left + width - cornerLen, top + height), strokeW)
-    drawLine(c, Offset(left + width, top + height), Offset(left + width, top + height - cornerLen), strokeW)
+    drawCornerBrackets(left, top, width, height, cornerLen, strokeW, AccentCyan.copy(alpha = cornerPulse))
 
     // Scanning line (horizontal sweep)
     val scanY = top + height * scanProgress
@@ -162,7 +164,14 @@ private fun DrawScope.drawSelectedObject(
     // --- AR Tag (floating label above object) ---
     val padding = 10f
     val tagGap = 8f // gap between box and tag
-    val connectorLen = 20f
+    val accentBarInset = 4f // accent bar 오른쪽 여백
+
+    // 화면 비례 동적 크기
+    val screenWidth = size.width
+    val screenHeight = size.height
+    val maxTagWidth = screenWidth * 0.75f
+    val minTagWidth = 160f
+    val innerPadding = padding + accentBarInset // 텍스트 왼쪽 총 여백
 
     // Label text
     val labelText = obj.label.uppercase()
@@ -182,53 +191,72 @@ private fun DrawScope.drawSelectedObject(
         style = TextStyle(fontSize = 12.sp, color = Color.White.copy(alpha = 0.7f))
     )
 
+    // Label row width
+    val labelRowWidth = labelResult.size.width + 8f + confResult.size.width
+
     // Description text (from inference)
     val descText = when (inferenceState) {
         is InferenceState.Success -> inferenceState.text
         is InferenceState.Loading -> "분석 중..."
         else -> null
     }
+    val descMaxWidth = (maxTagWidth - innerPadding - padding).toInt().coerceAtLeast(200)
     val descResult = descText?.let {
         textMeasurer.measure(
             text = it,
             style = TextStyle(fontSize = 11.sp, color = Color.White.copy(alpha = 0.9f)),
-            constraints = Constraints(maxWidth = 500),
+            constraints = Constraints(maxWidth = descMaxWidth),
             overflow = TextOverflow.Ellipsis,
-            maxLines = 2
+            maxLines = 4
         )
     }
 
-    // Calculate tag dimensions
+    // Calculate tag dimensions (동적)
     val tagContentWidth = maxOf(
-        labelResult.size.width + 8f + confResult.size.width,
+        labelRowWidth,
         descResult?.size?.width?.toFloat() ?: 0f
     )
-    val tagWidth = tagContentWidth + padding * 2
+    val tagWidth = (tagContentWidth + innerPadding + padding)
+        .coerceIn(minTagWidth, maxTagWidth)
+    val descSpacing = 6f
     val tagHeight = labelResult.size.height + padding * 2 +
-        (descResult?.let { it.size.height + 6f } ?: 0f)
+        (descResult?.let { it.size.height + descSpacing } ?: 0f)
 
-    // Tag position: above the bounding box, centered
-    val tagLeft = (left + width / 2 - tagWidth / 2).coerceIn(4f, size.width - tagWidth - 4f)
-    val tagBottom = top - tagGap
-    val tagTop = tagBottom - tagHeight
+    // Tag position: above the bounding box, or below if not enough space
+    val tagLeft = (left + width / 2 - tagWidth / 2).coerceIn(4f, screenWidth - tagWidth - 4f)
+    val showBelow = (top - tagGap - tagHeight) < 4f
+    val tagTop: Float
+    val connectorStart: Float
+    val connectorEnd: Float
+    if (showBelow) {
+        tagTop = (top + height + tagGap).coerceAtMost(screenHeight - tagHeight - 4f)
+        connectorStart = top + height
+        connectorEnd = tagTop
+    } else {
+        tagTop = (top - tagGap - tagHeight).coerceAtLeast(4f)
+        connectorStart = tagTop + tagHeight
+        connectorEnd = top
+    }
+    val tagBottom = tagTop + tagHeight
 
     // Connector line from tag to box
     val connectorX = left + width / 2
     drawLine(
         color = AccentCyan.copy(alpha = 0.5f),
-        start = Offset(connectorX, tagBottom),
-        end = Offset(connectorX, top),
+        start = Offset(connectorX, connectorStart),
+        end = Offset(connectorX, connectorEnd),
         strokeWidth = 1f,
         pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 3f))
     )
 
-    // Small diamond at connector top
+    // Small diamond at connector joint
     val diamondSize = 4f
+    val diamondY = if (showBelow) tagTop else tagBottom
     val diamondPath = Path().apply {
-        moveTo(connectorX, tagBottom)
-        lineTo(connectorX - diamondSize, tagBottom + diamondSize)
-        lineTo(connectorX, tagBottom + diamondSize * 2)
-        lineTo(connectorX + diamondSize, tagBottom + diamondSize)
+        moveTo(connectorX, diamondY)
+        lineTo(connectorX - diamondSize, diamondY + diamondSize)
+        lineTo(connectorX, diamondY + diamondSize * 2)
+        lineTo(connectorX + diamondSize, diamondY + diamondSize)
         close()
     }
     drawPath(diamondPath, AccentCyan)
@@ -297,19 +325,7 @@ private fun DrawScope.drawUnselectedObject(
     val strokeW = 1.5f
     val c = UnselectedColor
 
-    // Corner brackets only (minimal, non-intrusive)
-    // Top-left
-    drawLine(c, Offset(left, top), Offset(left + cornerLen, top), strokeW)
-    drawLine(c, Offset(left, top), Offset(left, top + cornerLen), strokeW)
-    // Top-right
-    drawLine(c, Offset(left + width, top), Offset(left + width - cornerLen, top), strokeW)
-    drawLine(c, Offset(left + width, top), Offset(left + width, top + cornerLen), strokeW)
-    // Bottom-left
-    drawLine(c, Offset(left, top + height), Offset(left + cornerLen, top + height), strokeW)
-    drawLine(c, Offset(left, top + height), Offset(left, top + height - cornerLen), strokeW)
-    // Bottom-right
-    drawLine(c, Offset(left + width, top + height), Offset(left + width - cornerLen, top + height), strokeW)
-    drawLine(c, Offset(left + width, top + height), Offset(left + width, top + height - cornerLen), strokeW)
+    drawCornerBrackets(left, top, width, height, cornerLen, strokeW, c)
 
     // Small label at top-left corner
     val labelText = obj.label
@@ -329,4 +345,153 @@ private fun DrawScope.drawUnselectedObject(
         textLayoutResult = textResult,
         topLeft = Offset(left + chipPad, top - textResult.size.height - chipPad)
     )
+}
+
+/** 터치 좌표에 장면 설명 AR 태그를 그린다. */
+private fun DrawScope.drawSceneTag(
+    tapX: Float,
+    tapY: Float,
+    cornerPulse: Float,
+    inferenceState: InferenceState,
+    textMeasurer: androidx.compose.ui.text.TextMeasurer
+) {
+    val padding = 10f
+    val accentBarInset = 4f
+    val screenWidth = size.width
+    val screenHeight = size.height
+    val maxTagWidth = screenWidth * 0.75f
+    val minTagWidth = 160f
+    val innerPadding = padding + accentBarInset
+
+    // 타이틀
+    val titleText = when (inferenceState) {
+        is InferenceState.Loading -> "장면 분석 중..."
+        is InferenceState.Success -> "SCENE"
+        is InferenceState.Error -> "분석 실패"
+        else -> return
+    }
+    val titleResult = textMeasurer.measure(
+        text = titleText,
+        style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Bold, color = AccentCyan)
+    )
+
+    // 설명 텍스트
+    val descMaxWidth = (maxTagWidth - innerPadding - padding).toInt().coerceAtLeast(200)
+    val descText = when (inferenceState) {
+        is InferenceState.Success -> inferenceState.text
+        is InferenceState.Loading -> "VLM이 이미지를 분석하고 있습니다..."
+        is InferenceState.Error -> inferenceState.message ?: "추론 실패"
+        else -> return
+    }
+    val descResult = textMeasurer.measure(
+        text = descText,
+        style = TextStyle(fontSize = 11.sp, color = Color.White.copy(alpha = 0.9f)),
+        constraints = Constraints(maxWidth = descMaxWidth),
+        overflow = TextOverflow.Ellipsis,
+        maxLines = 4
+    )
+
+    val descSpacing = 6f
+    val tagContentWidth = maxOf(titleResult.size.width.toFloat(), descResult.size.width.toFloat())
+    val tagWidth = (tagContentWidth + innerPadding + padding).coerceIn(minTagWidth, maxTagWidth)
+    val tagHeight = titleResult.size.height + padding * 2 + descResult.size.height + descSpacing
+
+    // 태그 위치: 터치 좌표 위쪽, 화면 밖으로 안 나가게
+    val tagLeft = (tapX - tagWidth / 2).coerceIn(4f, screenWidth - tagWidth - 4f)
+    val tagGap = 24f
+    val showBelow = (tapY - tagGap - tagHeight) < 4f
+    val tagTop = if (showBelow) {
+        (tapY + tagGap).coerceAtMost(screenHeight - tagHeight - 4f)
+    } else {
+        (tapY - tagGap - tagHeight).coerceAtLeast(4f)
+    }
+    val tagBottom = tagTop + tagHeight
+
+    // 커넥터 라인
+    val connectorStartY = if (showBelow) tapY else tagBottom
+    val connectorEndY = if (showBelow) tagTop else tapY
+    drawLine(
+        color = AccentCyan.copy(alpha = 0.5f),
+        start = Offset(tapX, connectorStartY),
+        end = Offset(tapX, connectorEndY),
+        strokeWidth = 1f,
+        pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 3f))
+    )
+
+    // 다이아몬드
+    val diamondSize = 4f
+    val diamondY = if (showBelow) tagTop else tagBottom
+    val diamondPath = Path().apply {
+        moveTo(tapX, diamondY)
+        lineTo(tapX - diamondSize, diamondY + diamondSize)
+        lineTo(tapX, diamondY + diamondSize * 2)
+        lineTo(tapX + diamondSize, diamondY + diamondSize)
+        close()
+    }
+    drawPath(diamondPath, AccentCyan)
+
+    // 터치 포인트 원형 펄스
+    drawCircle(
+        color = AccentCyan.copy(alpha = cornerPulse * 0.3f),
+        radius = 30f,
+        center = Offset(tapX, tapY)
+    )
+    drawCircle(
+        color = AccentCyan.copy(alpha = cornerPulse),
+        radius = 6f,
+        center = Offset(tapX, tapY)
+    )
+
+    // 태그 배경
+    drawRoundRect(
+        color = TagBackgroundSelected,
+        topLeft = Offset(tagLeft, tagTop),
+        size = Size(tagWidth, tagHeight),
+        cornerRadius = CornerRadius(6f, 6f)
+    )
+    // 태그 테두리
+    drawRoundRect(
+        color = AccentCyan.copy(alpha = 0.4f),
+        topLeft = Offset(tagLeft, tagTop),
+        size = Size(tagWidth, tagHeight),
+        cornerRadius = CornerRadius(6f, 6f),
+        style = Stroke(width = 1f)
+    )
+    // Accent bar
+    drawRoundRect(
+        color = AccentCyan,
+        topLeft = Offset(tagLeft, tagTop + 4f),
+        size = Size(3f, tagHeight - 8f),
+        cornerRadius = CornerRadius(2f, 2f)
+    )
+
+    // 타이틀
+    drawText(
+        textLayoutResult = titleResult,
+        topLeft = Offset(tagLeft + innerPadding, tagTop + padding)
+    )
+    // 설명
+    drawText(
+        textLayoutResult = descResult,
+        topLeft = Offset(tagLeft + innerPadding, tagTop + padding + titleResult.size.height + descSpacing)
+    )
+}
+
+/** 4개 코너에 L자형 브래킷을 그린다. */
+private fun DrawScope.drawCornerBrackets(
+    left: Float, top: Float, width: Float, height: Float,
+    cornerLen: Float, strokeW: Float, color: Color
+) {
+    // Top-left
+    drawLine(color, Offset(left, top), Offset(left + cornerLen, top), strokeW)
+    drawLine(color, Offset(left, top), Offset(left, top + cornerLen), strokeW)
+    // Top-right
+    drawLine(color, Offset(left + width, top), Offset(left + width - cornerLen, top), strokeW)
+    drawLine(color, Offset(left + width, top), Offset(left + width, top + cornerLen), strokeW)
+    // Bottom-left
+    drawLine(color, Offset(left, top + height), Offset(left + cornerLen, top + height), strokeW)
+    drawLine(color, Offset(left, top + height), Offset(left, top + height - cornerLen), strokeW)
+    // Bottom-right
+    drawLine(color, Offset(left + width, top + height), Offset(left + width - cornerLen, top + height), strokeW)
+    drawLine(color, Offset(left + width, top + height), Offset(left + width, top + height - cornerLen), strokeW)
 }

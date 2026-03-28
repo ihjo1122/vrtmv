@@ -77,6 +77,6 @@ dependencies {
     // MediaPipe
     implementation(libs.mediapipe.vision)
 
-    // MediaPipe LLM Inference (on-device, Gemma/Phi etc.)
-    implementation("com.google.mediapipe:tasks-genai:0.10.24")
+    // LiteRT-LM (on-device, Gemma 3n etc.)
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.8.0")
 }

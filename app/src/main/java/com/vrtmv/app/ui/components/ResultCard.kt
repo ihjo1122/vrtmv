@@ -1,10 +1,11 @@
 package com.vrtmv.app.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,22 +31,37 @@ import androidx.compose.ui.unit.sp
 import com.vrtmv.app.domain.model.DetectedObject
 import com.vrtmv.app.domain.model.InferenceState
 
+private sealed class CardType {
+    data object HINT : CardType()
+    data object LOADING : CardType()
+    data class ERROR(val message: String) : CardType()
+    data object NONE : CardType()
+}
+
 @Composable
 fun ResultCard(
     inferenceState: InferenceState,
     selectedObject: DetectedObject?,
     modifier: Modifier = Modifier
 ) {
-    // Show hint when idle, show result card for other states
-    when {
-        inferenceState is InferenceState.Idle && selectedObject == null -> {
-            // Hint card
-            AnimatedVisibility(
-                visible = true,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-                modifier = modifier
-            ) {
+    val cardType = when {
+        inferenceState is InferenceState.Idle && selectedObject == null -> CardType.HINT
+        inferenceState is InferenceState.Loading -> CardType.LOADING
+        inferenceState is InferenceState.Error -> CardType.ERROR(inferenceState.message ?: "추론 실패")
+        else -> CardType.NONE
+    }
+
+    AnimatedContent(
+        targetState = cardType,
+        transitionSpec = {
+            (slideInVertically(initialOffsetY = { it }) + fadeIn())
+                .togetherWith(slideOutVertically(targetOffsetY = { it }) + fadeOut())
+        },
+        modifier = modifier,
+        label = "resultCard"
+    ) { type ->
+        when (type) {
+            is CardType.HINT -> {
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = Color.Black.copy(alpha = 0.7f)
@@ -71,15 +87,8 @@ fun ResultCard(
                     }
                 }
             }
-        }
 
-        inferenceState is InferenceState.Loading -> {
-            AnimatedVisibility(
-                visible = true,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-                modifier = modifier
-            ) {
+            is CardType.LOADING -> {
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = Color.Black.copy(alpha = 0.85f)
@@ -102,15 +111,8 @@ fun ResultCard(
                     }
                 }
             }
-        }
 
-        inferenceState is InferenceState.Error -> {
-            AnimatedVisibility(
-                visible = true,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-                modifier = modifier
-            ) {
+            is CardType.ERROR -> {
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = Color.Black.copy(alpha = 0.85f)
@@ -119,16 +121,15 @@ fun ResultCard(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = inferenceState.message ?: "추론 실패",
+                        text = type.message,
                         color = Color(0xFFEF5350),
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(16.dp)
                     )
                 }
             }
-        }
 
-        // Success or Idle with selected object — AR tag handles display
-        else -> { /* AR overlay shows the info */ }
+            is CardType.NONE -> { /* AR overlay shows the info */ }
+        }
     }
 }

@@ -2,6 +2,7 @@ package com.vrtmv.app.ui.camera
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.util.Log
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
@@ -54,6 +56,7 @@ import com.vrtmv.app.data.inference.VlmMode
 import com.vrtmv.app.ui.overlay.DetectionOverlay
 import com.vrtmv.app.ui.overlay.GazeCrosshair
 import com.vrtmv.app.ui.components.ResultCard
+import java.util.concurrent.Executors
 @Composable
 fun CameraScreen(
     viewModel: CameraViewModel = hiltViewModel()
@@ -74,11 +77,11 @@ fun CameraScreen(
 
     LaunchedEffect(Unit) {
         if (!hasPermission) {
-            // 카메라 + 저장소 읽기 권한 동시 요청
-            permissionLauncher.launch(arrayOf(
-                Manifest.permission.CAMERA,
-                Manifest.permission.READ_EXTERNAL_STORAGE
-            ))
+            val permissions = mutableListOf(Manifest.permission.CAMERA)
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
+                permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+            permissionLauncher.launch(permissions.toTypedArray())
         }
     }
 
@@ -107,9 +110,13 @@ private fun CameraContent(viewModel: CameraViewModel) {
     var viewSize by remember { mutableStateOf(androidx.compose.ui.geometry.Size.Zero) }
 
     val detectionManager = remember { ObjectDetectionManager(context) }
+    val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
 
     DisposableEffect(Unit) {
-        onDispose { detectionManager.close() }
+        onDispose {
+            detectionManager.close()
+            analyzerExecutor.shutdown()
+        }
     }
 
     // CoordinateMapper는 ViewModel에서 생성하여 UiState에 포함 (이중 생성 방지)
@@ -159,9 +166,7 @@ private fun CameraContent(viewModel: CameraViewModel) {
                         .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                         .build()
                         .also { analysis ->
-                            analysis.setAnalyzer(
-                                ContextCompat.getMainExecutor(ctx)
-                            ) { imageProxy ->
+                            analysis.setAnalyzer(analyzerExecutor) { imageProxy ->
                                 detectionManager.updateFrame(imageProxy)
                             }
                         }
@@ -184,13 +189,18 @@ private fun CameraContent(viewModel: CameraViewModel) {
             modifier = Modifier.fillMaxSize()
         )
 
-        // Layer 2: AR overlay
-        if (coordinateMapper != null && uiState.detectedObjects.isNotEmpty()) {
+        // Layer 2: AR overlay (객체 검출 or 장면 추론 시)
+        val showOverlay = coordinateMapper != null && (
+            uiState.detectedObjects.isNotEmpty() ||
+            (uiState.tapPoint != null && uiState.inferenceState !is com.vrtmv.app.domain.model.InferenceState.Idle)
+        )
+        if (showOverlay) {
             DetectionOverlay(
                 detectedObjects = uiState.detectedObjects,
                 selectedObject = uiState.selectedObject,
                 inferenceState = uiState.inferenceState,
-                coordinateMapper = coordinateMapper,
+                coordinateMapper = coordinateMapper!!,
+                tapPoint = uiState.tapPoint,
                 modifier = Modifier.fillMaxSize()
             )
         }
@@ -211,6 +221,28 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 .align(Alignment.BottomCenter)
                 .padding(16.dp)
         )
+
+        // Layer 4.5: 추론 중지 버튼 (추론 중일 때 우상단 VLM 토글 아래)
+        if (uiState.inferenceState is com.vrtmv.app.domain.model.InferenceState.Loading) {
+            FilledTonalIconButton(
+                onClick = { viewModel.clearSelection() },
+                shape = RoundedCornerShape(12.dp),
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = Color(0xCC000000),
+                    contentColor = Color(0xFFEF5350)
+                ),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 104.dp, end = 16.dp)
+                    .size(48.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Stop,
+                    contentDescription = "추론 중지",
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        }
 
         // Layer 5: VLM mode toggle button (top-right)
         VlmToggleButton(
@@ -241,8 +273,9 @@ private fun CameraContent(viewModel: CameraViewModel) {
                     fontSize = 11.sp
                 )
                 if (uiState.inferenceTimeMs > 0) {
+                    val sec = (uiState.inferenceTimeMs + 500) / 1000
                     Text(
-                        text = "${uiState.inferenceTimeMs}ms",
+                        text = "약 ${sec}초",
                         color = Color.White.copy(alpha = 0.7f),
                         fontSize = 11.sp
                     )

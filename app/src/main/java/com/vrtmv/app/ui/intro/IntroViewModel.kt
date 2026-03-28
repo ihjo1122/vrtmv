@@ -3,6 +3,7 @@ package com.vrtmv.app.ui.intro
 import android.app.DownloadManager
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.vrtmv.app.data.download.ManualInstallRequiredException
 import com.vrtmv.app.data.download.ModelDownloadManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
@@ -58,9 +59,9 @@ class IntroViewModel @Inject constructor(
             if (exists) {
                 _uiState.value = IntroUiState.ModelReady
 
-                // 최소 4초 대기
+                // 최소 1.5초 대기 (브랜딩 표시)
                 val elapsed = System.currentTimeMillis() - startTime
-                val remaining = 4000 - elapsed
+                val remaining = 1500 - elapsed
                 if (remaining > 0) delay(remaining)
 
                 _uiState.value = IntroUiState.Ready
@@ -80,9 +81,9 @@ class IntroViewModel @Inject constructor(
                         progress.isComplete -> {
                             _uiState.value = IntroUiState.ModelReady
 
-                            // 최소 4초 대기
+                            // 최소 1.5초 대기 (브랜딩 표시)
                             val elapsed = System.currentTimeMillis() - startTime
-                            val remaining = 4000 - elapsed
+                            val remaining = 1500 - elapsed
                             if (remaining > 0) delay(remaining)
 
                             _uiState.value = IntroUiState.Ready
@@ -106,6 +107,9 @@ class IntroViewModel @Inject constructor(
                         }
                     }
                 }
+            } catch (e: ManualInstallRequiredException) {
+                // 수동 배치 모델: 다운로드 불가, 바로 메인 진입 허용
+                _uiState.value = IntroUiState.Ready
             } catch (e: Exception) {
                 _uiState.value = IntroUiState.DownloadError(
                     e.message ?: "알 수 없는 오류가 발생했습니다"

@@ -14,7 +14,6 @@ import com.vrtmv.app.util.CoordinateMapper
 import com.vrtmv.app.util.GazeTargetResolver
 import com.vrtmv.app.util.RoiCropper
 import androidx.lifecycle.SavedStateHandle
-import com.vrtmv.app.data.inference.GeminiNanoEngine
 import com.vrtmv.app.domain.model.ModelRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -76,8 +75,7 @@ class CameraViewModel @Inject constructor(
         // 모델 로드 (5-15초 소요 가능)
         viewModelScope.launch {
             Log.d(TAG, "모델 로드 시작: ${modelInfo.displayName}")
-            val engine = inferenceEngine as? GeminiNanoEngine
-            val success = engine?.loadModel(modelInfo) ?: true
+            val success = inferenceEngine.loadModel(modelInfo)
             if (!success) {
                 Log.w(TAG, "모델 로드 실패: ${modelInfo.displayName}")
             }
@@ -104,6 +102,12 @@ class CameraViewModel @Inject constructor(
         viewWidth: Float,
         viewHeight: Float
     ) {
+        // 추론 중이면 터치 무시
+        if (_uiState.value.inferenceState is InferenceState.Loading) {
+            Log.d(TAG, "▶ 추론 중 — 터치 무시")
+            return
+        }
+
         inferenceJob?.cancel()
 
         val result = detectionManager.detectNow() ?: run {
@@ -144,7 +148,7 @@ class CameraViewModel @Inject constructor(
         Log.d(TAG, "▶ SELECTED: ${selected?.label ?: "없음"}")
         Log.d(TAG, "════════════════════════════════════════")
 
-        _uiState.value.capturedBitmap?.recycle()
+        val oldBitmap = _uiState.value.capturedBitmap
 
         _uiState.value = _uiState.value.copy(
             detectedObjects = result.objects,
@@ -163,9 +167,16 @@ class CameraViewModel @Inject constructor(
             }
         )
 
-        // VLM ON이면 온디바이스 추론 실행
-        if (selected != null && _uiState.value.vlmMode == VlmMode.ON) {
-            runInference(result.bitmap, selected)
+        // 새 상태 설정 후 이전 비트맵 해제
+        oldBitmap?.recycle()
+
+        // VLM ON이면 추론 실행
+        if (_uiState.value.vlmMode == VlmMode.ON) {
+            if (selected != null) {
+                runInference(result.bitmap, selected)
+            } else {
+                runSceneInference(result.bitmap)
+            }
         }
     }
 
@@ -182,7 +193,7 @@ class CameraViewModel @Inject constructor(
                 val cropped = RoiCropper.crop(bitmap, obj.boundingBox)
 
                 val startTime = System.currentTimeMillis()
-                val description = withTimeout(15_000) {
+                val description = withTimeout(60_000) {
                     inferenceEngine.describe(cropped, obj.label, obj.confidence)
                 }
                 val elapsed = System.currentTimeMillis() - startTime
@@ -194,6 +205,9 @@ class CameraViewModel @Inject constructor(
                     inferenceState = InferenceState.Success(description),
                     inferenceTimeMs = elapsed
                 )
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                // 사용자 중지 — 상태 업데이트 안 함
+                Log.d(TAG, "▶ 추론 취소됨")
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     inferenceState = InferenceState.Error(e.message ?: "추론 실패")
@@ -202,16 +216,50 @@ class CameraViewModel @Inject constructor(
         }
     }
 
-    /** 선택 해제. 롱프레스 시 호출 */
-    fun clearSelection() {
-        inferenceJob?.cancel()
-        _uiState.value.capturedBitmap?.recycle()
-        _uiState.value = CameraUiState(vlmMode = _uiState.value.vlmMode)
+    /** 전체 장면 추론. 객체 미검출 시 호출. */
+    private fun runSceneInference(bitmap: Bitmap) {
+        _uiState.value = _uiState.value.copy(inferenceState = InferenceState.Loading)
+
+        inferenceJob = viewModelScope.launch {
+            try {
+                val startTime = System.currentTimeMillis()
+                val description = withTimeout(60_000) {
+                    inferenceEngine.describeScene(bitmap)
+                }
+                val elapsed = System.currentTimeMillis() - startTime
+
+                Log.d(TAG, "▶ 장면 추론 완료: ${elapsed}ms")
+
+                _uiState.value = _uiState.value.copy(
+                    inferenceState = InferenceState.Success(description),
+                    inferenceTimeMs = elapsed
+                )
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                Log.d(TAG, "▶ 장면 추론 취소됨")
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(
+                    inferenceState = InferenceState.Error(e.message ?: "추론 실패")
+                )
+            }
+        }
     }
 
-    /** ViewModel 소멸 시 비트맵 메모리 해제 */
+    /** 선택 해제 / 추론 중지. 롱프레스 시 호출. */
+    fun clearSelection() {
+        inferenceJob?.cancel()
+        val oldBitmap = _uiState.value.capturedBitmap
+        _uiState.value = CameraUiState(
+            vlmMode = _uiState.value.vlmMode,
+            modelDisplayName = _uiState.value.modelDisplayName
+        )
+        oldBitmap?.recycle()
+    }
+
+    /** ViewModel 소멸 시 비트맵 + 엔진 메모리 해제 */
     override fun onCleared() {
         super.onCleared()
         _uiState.value.capturedBitmap?.recycle()
+        // GPU 메모리 해제 (카메라 화면 종료 시)
+        inferenceEngine.release()
     }
 }

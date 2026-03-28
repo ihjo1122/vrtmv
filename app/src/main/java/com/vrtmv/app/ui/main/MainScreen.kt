@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.vrtmv.app.domain.model.ModelInfo
+import com.vrtmv.app.ui.components.AppHeader
 import com.vrtmv.app.ui.components.DownloadProgressUI
 
 private val CyanAccent = Color(0xFF00BCD4)
@@ -60,27 +61,11 @@ fun MainScreen(
             .background(DarkBackground)
     ) {
         // 앱 브랜딩 (상단)
-        Column(
+        AppHeader(
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 120.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                text = "VRTMV",
-                fontSize = 36.sp,
-                fontWeight = FontWeight.Bold,
-                color = CyanAccent,
-                letterSpacing = 6.sp
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "Visual Real-Time Mobile Vision",
-                fontSize = 11.sp,
-                color = SubtleGray,
-                letterSpacing = 2.sp
-            )
-        }
+                .padding(top = 120.dp)
+        )
 
         // 모델별 AR Camera 버튼 (중앙)
         Column(
