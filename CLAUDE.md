@@ -34,7 +34,7 @@ com.vrtmv.app/
 │   ├── detection/ObjectDetectionManager.kt  # MediaPipe 래퍼 (온디맨드)
 │   ├── download/ModelDownloadManager.kt     # 모델 다운로드 (DownloadManager)
 │   └── inference/
-│       ├── InferenceEngine.kt         # 인터페이스 (describe/describeScene/loadModel/release)
+│       ├── InferenceEngine.kt         # 인터페이스 (describe/describeScene/isAvailable/loadModel/release)
 │       ├── LiteRtLmEngine.kt         # 온디바이스 VLM (LiteRT-LM, .litertlm, 멀티모달)
 │       ├── PromptBuilder.kt           # 비전/장면 프롬프트 템플릿
 │       └── VlmMode.kt                # OFF / ON enum
@@ -50,7 +50,7 @@ com.vrtmv.app/
 │   ├── camera/CameraScreen.kt, CameraViewModel.kt
 │   ├── overlay/DetectionOverlay.kt, GazeCrosshair.kt
 │   ├── components/AppHeader.kt, ResultCard.kt, DownloadProgressUI.kt
-│   └── theme/Theme.kt
+│   └── theme/Theme.kt, Color.kt, Type.kt
 ├── util/
 │   ├── CoordinateMapper.kt           # 이미지↔화면 좌표 변환
 │   ├── GazeTargetResolver.kt         # 터치→객체 매칭 알고리즘
