@@ -5,20 +5,32 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -30,6 +42,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -40,10 +54,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vrtmv.app.ui.components.AppHeader
-
-private val CyanAccent = Color(0xFF00BCD4)
-private val DarkBackground = Color(0xFF0A0A0A)
-private val SubtleGray = Color(0xFF888888)
+import com.vrtmv.app.ui.components.GradientProgressBar
+import com.vrtmv.app.ui.theme.ArCyan
+import com.vrtmv.app.ui.theme.StatusError
+import com.vrtmv.app.ui.theme.SurfaceDark
+import com.vrtmv.app.ui.theme.TextPrimary
+import com.vrtmv.app.ui.theme.TextSecondary
+import com.vrtmv.app.ui.theme.TextTertiary
 
 @Composable
 fun IntroScreen(
@@ -54,7 +71,6 @@ fun IntroScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var storageGranted by remember { mutableStateOf(Environment.isExternalStorageManager()) }
 
-    // 설정 화면에서 돌아왔을 때 권한 재확인
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         val granted = Environment.isExternalStorageManager()
         if (granted && !storageGranted) {
@@ -64,7 +80,6 @@ fun IntroScreen(
         storageGranted = granted
     }
 
-    // 권한이 없으면 요청 UI 표시
     if (!storageGranted) {
         StoragePermissionScreen(
             onRequestPermission = {
@@ -86,15 +101,22 @@ fun IntroScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(DarkBackground)
+            .background(SurfaceDark)
     ) {
-        // 앱 이름 (중앙)
-        AppHeader(
-            titleSize = 48.sp,
-            modifier = Modifier.align(Alignment.Center)
-        )
+        // HUD Background
+        HudBackground()
 
-        // 하단 상태 영역
+        // App branding (center) with entrance animation
+        val headerVisible = remember { MutableTransitionState(false).apply { targetState = true } }
+        AnimatedVisibility(
+            visibleState = headerVisible,
+            enter = fadeIn(tween(600)) + slideInVertically(tween(600)) { -40 },
+            modifier = Modifier.align(Alignment.Center)
+        ) {
+            AppHeader(titleSize = 48.sp)
+        }
+
+        // Bottom status area
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -107,13 +129,12 @@ fun IntroScreen(
                 is IntroUiState.Checking -> {
                     Text(
                         text = "패치 사항 확인중...",
-                        fontSize = 14.sp,
-                        color = SubtleGray
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary
                     )
-                    LinearProgressIndicator(
-                        modifier = Modifier.fillMaxWidth(),
-                        color = CyanAccent,
-                        trackColor = Color(0xFF1A1A1A)
+                    GradientProgressBar(
+                        progress = null,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
 
@@ -125,15 +146,13 @@ fun IntroScreen(
                     ) {
                         Text(
                             text = "최신 상태입니다",
-                            fontSize = 14.sp,
-                            color = CyanAccent
+                            style = MaterialTheme.typography.bodySmall,
+                            color = ArCyan
                         )
                     }
-                    LinearProgressIndicator(
-                        progress = { 1f },
-                        modifier = Modifier.fillMaxWidth(),
-                        color = CyanAccent,
-                        trackColor = Color(0xFF1A1A1A)
+                    GradientProgressBar(
+                        progress = 1f,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
 
@@ -141,37 +160,53 @@ fun IntroScreen(
                     val percent = (state.progress * 100).toInt()
                     Text(
                         text = "모델 다운로드 중... $percent%",
-                        fontSize = 14.sp,
-                        color = Color.White
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextPrimary
                     )
-                    LinearProgressIndicator(
-                        progress = { state.progress },
-                        modifier = Modifier.fillMaxWidth(),
-                        color = CyanAccent,
-                        trackColor = Color(0xFF1A1A1A)
+                    GradientProgressBar(
+                        progress = state.progress,
+                        modifier = Modifier.fillMaxWidth()
                     )
                     if (state.totalMB > 0) {
                         Text(
                             text = "${state.downloadedMB}MB / ${state.totalMB}MB",
-                            fontSize = 12.sp,
-                            color = SubtleGray
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary
                         )
                     }
                 }
 
                 is IntroUiState.DownloadError -> {
-                    Text(
-                        text = state.message,
-                        fontSize = 14.sp,
-                        color = Color(0xFFFF5252),
-                        textAlign = TextAlign.Center
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.ErrorOutline,
+                            contentDescription = null,
+                            tint = StatusError,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = state.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = StatusError,
+                            textAlign = TextAlign.Center
+                        )
+                    }
                     Spacer(modifier = Modifier.height(4.dp))
                     OutlinedButton(
                         onClick = { viewModel.retry() },
                         shape = RoundedCornerShape(8.dp),
                         colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = CyanAccent
+                            contentColor = ArCyan
+                        ),
+                        border = ButtonDefaults.outlinedButtonBorder(true).copy(
+                            brush = Brush.linearGradient(
+                                listOf(ArCyan.copy(alpha = 0.5f), ArCyan.copy(alpha = 0.2f))
+                            )
                         )
                     ) {
                         Text("다시 시도")
@@ -181,15 +216,13 @@ fun IntroScreen(
                     ) {
                         Text(
                             text = "건너뛰기",
-                            color = SubtleGray,
-                            fontSize = 12.sp
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
                 }
 
-                is IntroUiState.Ready -> {
-                    // 네비게이션 처리 중 — LaunchedEffect에서 처리
-                }
+                is IntroUiState.Ready -> { }
             }
         }
     }
@@ -200,37 +233,88 @@ private fun StoragePermissionScreen(onRequestPermission: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(DarkBackground)
+            .background(SurfaceDark)
     ) {
-        AppHeader(
-            titleSize = 48.sp,
-            modifier = Modifier.align(Alignment.Center)
-        )
+        HudBackground()
 
         Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .padding(horizontal = 32.dp, vertical = 64.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier.align(Alignment.Center),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            AppHeader(titleSize = 48.sp)
+
+            Spacer(modifier = Modifier.height(48.dp))
+
+            Icon(
+                imageVector = Icons.Outlined.FolderOpen,
+                contentDescription = null,
+                tint = ArCyan.copy(alpha = 0.6f),
+                modifier = Modifier.size(48.dp)
+            )
+            Spacer(modifier = Modifier.height(16.dp))
             Text(
                 text = "모델 파일 접근을 위해\n파일 관리 권한이 필요합니다",
-                fontSize = 14.sp,
-                color = SubtleGray,
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
                 textAlign = TextAlign.Center
             )
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(20.dp))
             OutlinedButton(
                 onClick = onRequestPermission,
                 shape = RoundedCornerShape(8.dp),
                 colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = CyanAccent
+                    contentColor = ArCyan
+                ),
+                border = ButtonDefaults.outlinedButtonBorder(true).copy(
+                    brush = Brush.linearGradient(
+                        listOf(ArCyan.copy(alpha = 0.5f), ArCyan.copy(alpha = 0.2f))
+                    )
                 )
             ) {
                 Text("권한 설정")
             }
+        }
+    }
+}
+
+/**
+ * HUD-style background: radial glow + grid pattern.
+ * Shared between IntroScreen and MainScreen.
+ */
+@Composable
+fun HudBackground(modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier.fillMaxSize()) {
+        // Radial glow at upper center
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    ArCyan.copy(alpha = 0.06f),
+                    ArCyan.copy(alpha = 0.02f),
+                    Color.Transparent
+                ),
+                center = Offset(size.width / 2, size.height * 0.35f),
+                radius = size.minDimension * 0.8f
+            ),
+            radius = size.minDimension * 0.8f,
+            center = Offset(size.width / 2, size.height * 0.35f)
+        )
+
+        // Grid lines
+        val gridSpacing = 80.dp.toPx()
+        val gridColor = TextTertiary.copy(alpha = 0.04f)
+        val strokeWidth = 0.5.dp.toPx()
+
+        // Vertical lines
+        var x = gridSpacing
+        while (x < size.width) {
+            drawLine(gridColor, Offset(x, 0f), Offset(x, size.height), strokeWidth)
+            x += gridSpacing
+        }
+        // Horizontal lines
+        var y = gridSpacing
+        while (y < size.height) {
+            drawLine(gridColor, Offset(0f, y), Offset(size.width, y), strokeWidth)
+            y += gridSpacing
         }
     }
 }

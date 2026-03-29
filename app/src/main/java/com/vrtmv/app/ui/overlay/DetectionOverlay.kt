@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -20,6 +21,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
@@ -27,15 +29,26 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.sp
 import com.vrtmv.app.domain.model.DetectedObject
 import com.vrtmv.app.domain.model.InferenceState
+import com.vrtmv.app.ui.theme.ArTeal
+import com.vrtmv.app.ui.theme.OverlayCyanBright
+import com.vrtmv.app.ui.theme.OverlayCyanDim
+import com.vrtmv.app.ui.theme.OverlayCyanFill
+import com.vrtmv.app.ui.theme.OverlayTagBg
+import com.vrtmv.app.ui.theme.OverlayTagBgSelected
+import com.vrtmv.app.ui.theme.OverlayUnselected
+import com.vrtmv.app.ui.theme.StatusError
 import com.vrtmv.app.util.CoordinateMapper
 
-// AR 스타일 색상
-private val AccentCyan = Color(0xFF00E5FF)
-private val AccentCyanDim = Color(0xFF00E5FF).copy(alpha = 0.4f)
-private val AccentCyanFill = Color(0xFF00E5FF).copy(alpha = 0.08f)
-private val UnselectedColor = Color.White.copy(alpha = 0.5f)
-private val TagBackground = Color(0xCC000000) // 80% black
-private val TagBackgroundSelected = Color(0xE6001529) // dark blue-black
+private val AccentCyan = OverlayCyanBright
+private val AccentCyanDim = OverlayCyanDim
+private val AccentCyanFill = OverlayCyanFill
+private val UnselectedColor = OverlayUnselected
+private val TagBackground = OverlayTagBg
+private val TagBgSelected = OverlayTagBgSelected
+
+// 로딩바 크기
+private const val LOADING_BAR_WIDTH = 180f
+private const val LOADING_BAR_HEIGHT = 4f
 
 @Composable
 fun DetectionOverlay(
@@ -49,26 +62,30 @@ fun DetectionOverlay(
     val textMeasurer = rememberTextMeasurer()
     val infiniteTransition = rememberInfiniteTransition(label = "ar_pulse")
 
-    // Scanning line animation for selected object
     val scanProgress by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(2000, easing = LinearEasing), RepeatMode.Restart),
         label = "scanLine"
     )
 
-    // Pulse for corner brackets
     val cornerPulse by infiniteTransition.animateFloat(
-        initialValue = 0.6f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
+        initialValue = 0.6f, targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(tween(1000, easing = LinearEasing), RepeatMode.Reverse),
         label = "cornerPulse"
+    )
+
+    // 로딩바 shimmer sweep
+    val shimmerProgress by infiniteTransition.animateFloat(
+        initialValue = -0.3f, targetValue = 1.3f,
+        animationSpec = infiniteRepeatable(tween(1500, easing = LinearEasing), RepeatMode.Restart),
+        label = "shimmer"
+    )
+
+    // 점 3개 순차 깜박임 (0~1 cycle, 각 점마다 오프셋)
+    val dotCycle by infiniteTransition.animateFloat(
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1200, easing = LinearEasing), RepeatMode.Restart),
+        label = "dotCycle"
     )
 
     Canvas(modifier = modifier) {
@@ -79,57 +96,58 @@ fun DetectionOverlay(
             if (isSelected) {
                 drawSelectedObject(
                     obj = obj,
-                    left = viewRect.left,
-                    top = viewRect.top,
-                    width = viewRect.width,
-                    height = viewRect.height,
+                    left = viewRect.left, top = viewRect.top,
+                    width = viewRect.width, height = viewRect.height,
                     scanProgress = scanProgress,
                     cornerPulse = cornerPulse,
                     inferenceState = inferenceState,
-                    textMeasurer = textMeasurer
+                    textMeasurer = textMeasurer,
+                    shimmerProgress = shimmerProgress,
+                    dotCycle = dotCycle
                 )
             } else {
                 drawUnselectedObject(
                     obj = obj,
-                    left = viewRect.left,
-                    top = viewRect.top,
-                    width = viewRect.width,
-                    height = viewRect.height,
+                    left = viewRect.left, top = viewRect.top,
+                    width = viewRect.width, height = viewRect.height,
+                    cornerPulse = cornerPulse,
                     textMeasurer = textMeasurer
                 )
             }
         }
 
-        // 객체 미선택 + 터치 좌표 있을 때 → 터치 위치에 장면 AR 태그
+        // 객체 미선택 + 터치 좌표 → 장면 추론 태그
         if (selectedObject == null && tapPoint != null &&
             inferenceState !is InferenceState.Idle
         ) {
             drawSceneTag(
-                tapX = tapPoint.x,
-                tapY = tapPoint.y,
+                tapX = tapPoint.x, tapY = tapPoint.y,
                 cornerPulse = cornerPulse,
                 inferenceState = inferenceState,
-                textMeasurer = textMeasurer
+                textMeasurer = textMeasurer,
+                shimmerProgress = shimmerProgress,
+                dotCycle = dotCycle
             )
         }
     }
 }
 
+// ════════════════════════════════════════════════════════════════
+// 선택된 객체
+// ════════════════════════════════════════════════════════════════
+
 private fun DrawScope.drawSelectedObject(
     obj: DetectedObject,
-    left: Float,
-    top: Float,
-    width: Float,
-    height: Float,
-    scanProgress: Float,
-    cornerPulse: Float,
+    left: Float, top: Float, width: Float, height: Float,
+    scanProgress: Float, cornerPulse: Float,
     inferenceState: InferenceState,
-    textMeasurer: androidx.compose.ui.text.TextMeasurer
+    textMeasurer: androidx.compose.ui.text.TextMeasurer,
+    shimmerProgress: Float,
+    dotCycle: Float
 ) {
     val cornerLen = minOf(width, height) * 0.2f
-    val strokeW = 3f
 
-    // Semi-transparent fill
+    // Fill
     drawRoundRect(
         color = AccentCyanFill,
         topLeft = Offset(left, top),
@@ -143,355 +161,478 @@ private fun DrawScope.drawSelectedObject(
         topLeft = Offset(left, top),
         size = Size(width, height),
         cornerRadius = CornerRadius(4f, 4f),
-        style = Stroke(
-            width = 1f,
-            pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
-        )
+        style = Stroke(width = 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
     )
 
-    // Corner brackets (AR targeting style)
-    drawCornerBrackets(left, top, width, height, cornerLen, strokeW, AccentCyan.copy(alpha = cornerPulse))
+    // Corner brackets + glow
+    val bracketColor = AccentCyan.copy(alpha = cornerPulse)
+    drawCornerBrackets(left, top, width, height, cornerLen, 3f, bracketColor)
+    drawCornerBrackets(left, top, width, height, cornerLen, 7f, bracketColor.copy(alpha = cornerPulse * 0.12f))
 
-    // Scanning line (horizontal sweep)
+    // Scan line
     val scanY = top + height * scanProgress
     drawLine(
-        color = AccentCyan.copy(alpha = 0.6f),
+        color = AccentCyan.copy(alpha = 0.5f),
         start = Offset(left + 2f, scanY),
         end = Offset(left + width - 2f, scanY),
         strokeWidth = 1.5f
     )
 
-    // --- AR Tag (floating label above object) ---
-    val padding = 10f
-    val tagGap = 8f // gap between box and tag
-    val accentBarInset = 4f // accent bar 오른쪽 여백
-
-    // 화면 비례 동적 크기
-    val screenWidth = size.width
-    val screenHeight = size.height
-    val maxTagWidth = screenWidth * 0.75f
-    val minTagWidth = 160f
-    val innerPadding = padding + accentBarInset // 텍스트 왼쪽 총 여백
-
-    // Label text
-    val labelText = obj.label.uppercase()
-    val labelResult = textMeasurer.measure(
-        text = labelText,
-        style = TextStyle(
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold,
-            color = AccentCyan
-        )
-    )
-
-    // Confidence text
-    val confText = "${(obj.confidence * 100).toInt()}%"
-    val confResult = textMeasurer.measure(
-        text = confText,
-        style = TextStyle(fontSize = 12.sp, color = Color.White.copy(alpha = 0.7f))
-    )
-
-    // Label row width
-    val labelRowWidth = labelResult.size.width + 8f + confResult.size.width
-
-    // Description text (from inference)
-    val descText = when (inferenceState) {
-        is InferenceState.Success -> inferenceState.text
-        is InferenceState.Loading -> "분석 중..."
-        else -> null
-    }
-    val descMaxWidth = (maxTagWidth - innerPadding - padding).toInt().coerceAtLeast(200)
-    val descResult = descText?.let {
-        textMeasurer.measure(
-            text = it,
-            style = TextStyle(fontSize = 11.sp, color = Color.White.copy(alpha = 0.9f)),
-            constraints = Constraints(maxWidth = descMaxWidth),
-            overflow = TextOverflow.Ellipsis,
-            maxLines = 4
-        )
+    // ── 로딩바 (화면 정중앙) ──
+    if (inferenceState is InferenceState.Loading) {
+        drawLoadingBar(size.width / 2, size.height / 2, shimmerProgress, textMeasurer, dotCycle)
     }
 
-    // Calculate tag dimensions (동적)
-    val tagContentWidth = maxOf(
-        labelRowWidth,
-        descResult?.size?.width?.toFloat() ?: 0f
-    )
-    val tagWidth = (tagContentWidth + innerPadding + padding)
-        .coerceIn(minTagWidth, maxTagWidth)
-    val descSpacing = 6f
-    val tagHeight = labelResult.size.height + padding * 2 +
-        (descResult?.let { it.size.height + descSpacing } ?: 0f)
-
-    // Tag position: above the bounding box, or below if not enough space
-    val tagLeft = (left + width / 2 - tagWidth / 2).coerceIn(4f, screenWidth - tagWidth - 4f)
-    val showBelow = (top - tagGap - tagHeight) < 4f
-    val tagTop: Float
-    val connectorStart: Float
-    val connectorEnd: Float
-    if (showBelow) {
-        tagTop = (top + height + tagGap).coerceAtMost(screenHeight - tagHeight - 4f)
-        connectorStart = top + height
-        connectorEnd = tagTop
-    } else {
-        tagTop = (top - tagGap - tagHeight).coerceAtLeast(4f)
-        connectorStart = tagTop + tagHeight
-        connectorEnd = top
-    }
-    val tagBottom = tagTop + tagHeight
-
-    // Connector line from tag to box
-    val connectorX = left + width / 2
-    drawLine(
-        color = AccentCyan.copy(alpha = 0.5f),
-        start = Offset(connectorX, connectorStart),
-        end = Offset(connectorX, connectorEnd),
-        strokeWidth = 1f,
-        pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 3f))
-    )
-
-    // Small diamond at connector joint
-    val diamondSize = 4f
-    val diamondY = if (showBelow) tagTop else tagBottom
-    val diamondPath = Path().apply {
-        moveTo(connectorX, diamondY)
-        lineTo(connectorX - diamondSize, diamondY + diamondSize)
-        lineTo(connectorX, diamondY + diamondSize * 2)
-        lineTo(connectorX + diamondSize, diamondY + diamondSize)
-        close()
-    }
-    drawPath(diamondPath, AccentCyan)
-
-    // Tag background
-    drawRoundRect(
-        color = TagBackgroundSelected,
-        topLeft = Offset(tagLeft, tagTop),
-        size = Size(tagWidth, tagHeight),
-        cornerRadius = CornerRadius(6f, 6f)
-    )
-
-    // Tag border
-    drawRoundRect(
-        color = AccentCyan.copy(alpha = 0.4f),
-        topLeft = Offset(tagLeft, tagTop),
-        size = Size(tagWidth, tagHeight),
-        cornerRadius = CornerRadius(6f, 6f),
-        style = Stroke(width = 1f)
-    )
-
-    // Accent bar on left side of tag
-    drawRoundRect(
-        color = AccentCyan,
-        topLeft = Offset(tagLeft, tagTop + 4f),
-        size = Size(3f, tagHeight - 8f),
-        cornerRadius = CornerRadius(2f, 2f)
-    )
-
-    // Draw label text
-    drawText(
-        textLayoutResult = labelResult,
-        topLeft = Offset(tagLeft + padding + 4f, tagTop + padding)
-    )
-
-    // Draw confidence next to label
-    drawText(
-        textLayoutResult = confResult,
-        topLeft = Offset(
-            tagLeft + padding + 4f + labelResult.size.width + 8f,
-            tagTop + padding + (labelResult.size.height - confResult.size.height)
-        )
-    )
-
-    // Draw description if available
-    if (descResult != null) {
-        drawText(
-            textLayoutResult = descResult,
-            topLeft = Offset(
-                tagLeft + padding + 4f,
-                tagTop + padding + labelResult.size.height + 6f
-            )
+    // ── AR 결과 태그 ──
+    if (inferenceState is InferenceState.Success || inferenceState is InferenceState.Idle) {
+        drawArResultTag(
+            anchorX = left + width / 2,
+            anchorTop = top,
+            anchorBottom = top + height,
+            obj = obj,
+            inferenceState = inferenceState,
+            textMeasurer = textMeasurer
         )
     }
 }
+
+// ════════════════════════════════════════════════════════════════
+// 미선택 객체
+// ════════════════════════════════════════════════════════════════
 
 private fun DrawScope.drawUnselectedObject(
     obj: DetectedObject,
-    left: Float,
-    top: Float,
-    width: Float,
-    height: Float,
+    left: Float, top: Float, width: Float, height: Float,
+    cornerPulse: Float,
     textMeasurer: androidx.compose.ui.text.TextMeasurer
 ) {
     val cornerLen = minOf(width, height) * 0.15f
-    val strokeW = 1.5f
-    val c = UnselectedColor
+    val c = UnselectedColor.copy(alpha = cornerPulse * 0.7f)
 
-    drawCornerBrackets(left, top, width, height, cornerLen, strokeW, c)
-
-    // Small label at top-left corner
-    val labelText = obj.label
-    val textResult = textMeasurer.measure(
-        text = labelText,
-        style = TextStyle(fontSize = 10.sp, color = Color.White.copy(alpha = 0.6f))
-    )
-
-    val chipPad = 3f
     drawRoundRect(
-        color = TagBackground,
-        topLeft = Offset(left, top - textResult.size.height - chipPad * 2),
-        size = Size(textResult.size.width + chipPad * 2, textResult.size.height + chipPad * 2),
-        cornerRadius = CornerRadius(3f, 3f)
+        color = Color.White.copy(alpha = 0.03f),
+        topLeft = Offset(left, top),
+        size = Size(width, height),
+        cornerRadius = CornerRadius(4f, 4f)
     )
-    drawText(
-        textLayoutResult = textResult,
-        topLeft = Offset(left + chipPad, top - textResult.size.height - chipPad)
+    drawCornerBrackets(left, top, width, height, cornerLen, 1.5f, c)
+
+    // Label chip
+    val chipText = "${obj.label}  ${(obj.confidence * 100).toInt()}%"
+    val textResult = textMeasurer.measure(
+        text = chipText,
+        style = TextStyle(fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = Color.White.copy(alpha = 0.7f))
     )
+    val chipPadH = 6f
+    val chipPadV = 3f
+    val chipW = textResult.size.width + chipPadH * 2
+    val chipH = textResult.size.height + chipPadV * 2
+    val chipTop = top - chipH - 2f
+
+    drawRoundRect(color = TagBackground, topLeft = Offset(left, chipTop), size = Size(chipW, chipH), cornerRadius = CornerRadius(4f, 4f))
+    drawRoundRect(color = UnselectedColor.copy(alpha = 0.2f), topLeft = Offset(left, chipTop), size = Size(chipW, chipH), cornerRadius = CornerRadius(4f, 4f), style = Stroke(0.5f))
+    drawText(textLayoutResult = textResult, topLeft = Offset(left + chipPadH, chipTop + chipPadV))
 }
 
-/** 터치 좌표에 장면 설명 AR 태그를 그린다. */
+// ════════════════════════════════════════════════════════════════
+// 장면 태그 (객체 미검출 시 탭 위치)
+// ════════════════════════════════════════════════════════════════
+
 private fun DrawScope.drawSceneTag(
-    tapX: Float,
-    tapY: Float,
+    tapX: Float, tapY: Float,
     cornerPulse: Float,
     inferenceState: InferenceState,
-    textMeasurer: androidx.compose.ui.text.TextMeasurer
+    textMeasurer: androidx.compose.ui.text.TextMeasurer,
+    shimmerProgress: Float,
+    dotCycle: Float
 ) {
-    val padding = 10f
-    val accentBarInset = 4f
-    val screenWidth = size.width
-    val screenHeight = size.height
-    val maxTagWidth = screenWidth * 0.75f
-    val minTagWidth = 160f
-    val innerPadding = padding + accentBarInset
+    // 터치 포인트 원형 펄스
+    drawCircle(color = AccentCyan.copy(alpha = cornerPulse * 0.15f), radius = 30f, center = Offset(tapX, tapY))
+    drawCircle(color = AccentCyan.copy(alpha = cornerPulse * 0.8f), radius = 5f, center = Offset(tapX, tapY))
 
-    // 타이틀
-    val titleText = when (inferenceState) {
-        is InferenceState.Loading -> "장면 분석 중..."
-        is InferenceState.Success -> "SCENE"
-        is InferenceState.Error -> "분석 실패"
+    // ── 로딩바 (화면 정중앙) ──
+    if (inferenceState is InferenceState.Loading) {
+        drawLoadingBar(size.width / 2, size.height / 2, shimmerProgress, textMeasurer, dotCycle)
+        return
+    }
+
+    // ── 결과 태그 ──
+    val titleText: String
+    val titleColor: Color
+    when (inferenceState) {
+        is InferenceState.Success -> { titleText = "SCENE"; titleColor = AccentCyan }
+        is InferenceState.Error -> { titleText = "ERROR"; titleColor = StatusError }
         else -> return
     }
-    val titleResult = textMeasurer.measure(
-        text = titleText,
-        style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Bold, color = AccentCyan)
-    )
-
-    // 설명 텍스트
-    val descMaxWidth = (maxTagWidth - innerPadding - padding).toInt().coerceAtLeast(200)
     val descText = when (inferenceState) {
         is InferenceState.Success -> inferenceState.text
-        is InferenceState.Loading -> "VLM이 이미지를 분석하고 있습니다..."
         is InferenceState.Error -> inferenceState.message ?: "추론 실패"
         else -> return
     }
-    val descResult = textMeasurer.measure(
-        text = descText,
-        style = TextStyle(fontSize = 11.sp, color = Color.White.copy(alpha = 0.9f)),
-        constraints = Constraints(maxWidth = descMaxWidth),
-        overflow = TextOverflow.Ellipsis,
-        maxLines = 4
+
+    drawResultPanel(
+        anchorX = tapX,
+        anchorY = tapY,
+        title = titleText,
+        titleColor = titleColor,
+        description = descText,
+        textMeasurer = textMeasurer,
+        useConnector = true
+    )
+}
+
+// ════════════════════════════════════════════════════════════════
+// AR 결과 태그 (선택 객체용)
+// ════════════════════════════════════════════════════════════════
+
+private fun DrawScope.drawArResultTag(
+    anchorX: Float, anchorTop: Float, anchorBottom: Float,
+    obj: DetectedObject,
+    inferenceState: InferenceState,
+    textMeasurer: androidx.compose.ui.text.TextMeasurer
+) {
+    // Idle 상태에선 라벨+신뢰도만 표시
+    val title = "${obj.label.uppercase()}  ${(obj.confidence * 100).toInt()}%"
+    val desc = when (inferenceState) {
+        is InferenceState.Success -> inferenceState.text
+        else -> null
+    }
+
+    val padding = 12f
+    val screenWidth = size.width
+    val screenHeight = size.height
+    val maxTagWidth = screenWidth * 0.8f
+
+    // ── 타이틀 측정 ──
+    val titleResult = textMeasurer.measure(
+        text = title,
+        style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, color = AccentCyan)
     )
 
-    val descSpacing = 6f
-    val tagContentWidth = maxOf(titleResult.size.width.toFloat(), descResult.size.width.toFloat())
-    val tagWidth = (tagContentWidth + innerPadding + padding).coerceIn(minTagWidth, maxTagWidth)
-    val tagHeight = titleResult.size.height + padding * 2 + descResult.size.height + descSpacing
-
-    // 태그 위치: 터치 좌표 위쪽, 화면 밖으로 안 나가게
-    val tagLeft = (tapX - tagWidth / 2).coerceIn(4f, screenWidth - tagWidth - 4f)
-    val tagGap = 24f
-    val showBelow = (tapY - tagGap - tagHeight) < 4f
-    val tagTop = if (showBelow) {
-        (tapY + tagGap).coerceAtMost(screenHeight - tagHeight - 4f)
-    } else {
-        (tapY - tagGap - tagHeight).coerceAtLeast(4f)
+    // ── 설명 측정 ──
+    val descMaxW = (maxTagWidth - padding * 2 - 8f).toInt().coerceAtLeast(200)
+    val descResult = desc?.let {
+        textMeasurer.measure(
+            text = it,
+            style = TextStyle(fontSize = 12.sp, color = Color.White.copy(alpha = 0.92f), lineHeight = 18.sp),
+            constraints = Constraints(maxWidth = descMaxW),
+            overflow = TextOverflow.Ellipsis,
+            maxLines = 5
+        )
     }
-    val tagBottom = tagTop + tagHeight
 
-    // 커넥터 라인
-    val connectorStartY = if (showBelow) tapY else tagBottom
-    val connectorEndY = if (showBelow) tagTop else tapY
+    // ── 크기 계산 ──
+    val separatorH = if (descResult != null) 8f else 0f
+    val lineH = if (descResult != null) 1f else 0f
+    val contentW = maxOf(titleResult.size.width.toFloat(), descResult?.size?.width?.toFloat() ?: 0f)
+    val tagWidth = (contentW + padding * 2 + 8f).coerceIn(140f, maxTagWidth) // 8f = 좌측 accent 영역
+    val tagHeight = padding + titleResult.size.height + separatorH + lineH +
+        (descResult?.let { it.size.height + 8f } ?: 0f) + padding
+
+    // ── 위치 결정 ──
+    val tagLeft = (anchorX - tagWidth / 2).coerceIn(4f, screenWidth - tagWidth - 4f)
+    val tagGap = 10f
+    val showBelow = (anchorTop - tagGap - tagHeight) < 4f
+    val tagTop: Float
+    val connStart: Float
+    val connEnd: Float
+    if (showBelow) {
+        tagTop = (anchorBottom + tagGap).coerceAtMost(screenHeight - tagHeight - 4f)
+        connStart = anchorBottom
+        connEnd = tagTop
+    } else {
+        tagTop = (anchorTop - tagGap - tagHeight).coerceAtLeast(4f)
+        connStart = tagTop + tagHeight
+        connEnd = anchorTop
+    }
+
+    // ── 커넥터 라인 ──
     drawLine(
-        color = AccentCyan.copy(alpha = 0.5f),
-        start = Offset(tapX, connectorStartY),
-        end = Offset(tapX, connectorEndY),
+        color = AccentCyan.copy(alpha = 0.3f),
+        start = Offset(anchorX, connStart),
+        end = Offset(anchorX, connEnd),
         strokeWidth = 1f,
         pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 3f))
     )
 
-    // 다이아몬드
-    val diamondSize = 4f
-    val diamondY = if (showBelow) tagTop else tagBottom
-    val diamondPath = Path().apply {
-        moveTo(tapX, diamondY)
-        lineTo(tapX - diamondSize, diamondY + diamondSize)
-        lineTo(tapX, diamondY + diamondSize * 2)
-        lineTo(tapX + diamondSize, diamondY + diamondSize)
-        close()
+    // ── 태그 본체 ──
+    drawResultTagBody(tagLeft, tagTop, tagWidth, tagHeight, titleResult, descResult, padding, separatorH)
+}
+
+// ════════════════════════════════════════════════════════════════
+// 결과 패널 (장면 추론 결과용)
+// ════════════════════════════════════════════════════════════════
+
+private fun DrawScope.drawResultPanel(
+    anchorX: Float, anchorY: Float,
+    title: String, titleColor: Color, description: String,
+    textMeasurer: androidx.compose.ui.text.TextMeasurer,
+    useConnector: Boolean
+) {
+    val padding = 12f
+    val screenWidth = size.width
+    val screenHeight = size.height
+    val maxTagWidth = screenWidth * 0.8f
+
+    val titleResult = textMeasurer.measure(
+        text = title,
+        style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, color = titleColor)
+    )
+    val descMaxW = (maxTagWidth - padding * 2 - 8f).toInt().coerceAtLeast(200)
+    val descResult = textMeasurer.measure(
+        text = description,
+        style = TextStyle(fontSize = 12.sp, color = Color.White.copy(alpha = 0.92f), lineHeight = 18.sp),
+        constraints = Constraints(maxWidth = descMaxW),
+        overflow = TextOverflow.Ellipsis,
+        maxLines = 5
+    )
+
+    val contentW = maxOf(titleResult.size.width.toFloat(), descResult.size.width.toFloat())
+    val tagWidth = (contentW + padding * 2 + 8f).coerceIn(140f, maxTagWidth)
+    val tagHeight = padding + titleResult.size.height + 8f + 1f + descResult.size.height + 8f + padding
+
+    val tagLeft = (anchorX - tagWidth / 2).coerceIn(4f, screenWidth - tagWidth - 4f)
+    val tagGap = 48f
+    val showBelow = (anchorY - tagGap - tagHeight) < 4f
+    val tagTop = if (showBelow) {
+        (anchorY + tagGap).coerceAtMost(screenHeight - tagHeight - 4f)
+    } else {
+        (anchorY - tagGap - tagHeight).coerceAtLeast(4f)
     }
-    drawPath(diamondPath, AccentCyan)
+    val tagBottom = tagTop + tagHeight
 
-    // 터치 포인트 원형 펄스
-    drawCircle(
-        color = AccentCyan.copy(alpha = cornerPulse * 0.3f),
-        radius = 30f,
-        center = Offset(tapX, tapY)
-    )
-    drawCircle(
-        color = AccentCyan.copy(alpha = cornerPulse),
-        radius = 6f,
-        center = Offset(tapX, tapY)
-    )
+    if (useConnector) {
+        val cStart = if (showBelow) anchorY + 16f else tagBottom
+        val cEnd = if (showBelow) tagTop else anchorY - 16f
+        drawLine(
+            color = titleColor.copy(alpha = 0.3f),
+            start = Offset(anchorX, cStart), end = Offset(anchorX, cEnd),
+            strokeWidth = 1f,
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 3f))
+        )
+    }
 
-    // 태그 배경
+    drawResultTagBody(tagLeft, tagTop, tagWidth, tagHeight, titleResult, descResult, padding, 8f)
+}
+
+// ════════════════════════════════════════════════════════════════
+// 태그 본체 렌더링 (공통)
+// ════════════════════════════════════════════════════════════════
+
+private fun DrawScope.drawResultTagBody(
+    tagLeft: Float, tagTop: Float, tagWidth: Float, tagHeight: Float,
+    titleResult: androidx.compose.ui.text.TextLayoutResult,
+    descResult: androidx.compose.ui.text.TextLayoutResult?,
+    padding: Float, separatorH: Float
+) {
+    val innerLeft = tagLeft + 8f // accent bar + gap
+
+    // ── 배경: 글래스 효과 (이중 레이어) ──
+    // 외부 글로우
     drawRoundRect(
-        color = TagBackgroundSelected,
+        color = AccentCyan.copy(alpha = 0.04f),
+        topLeft = Offset(tagLeft - 2f, tagTop - 2f),
+        size = Size(tagWidth + 4f, tagHeight + 4f),
+        cornerRadius = CornerRadius(10f, 10f)
+    )
+    // 메인 배경
+    drawRoundRect(
+        color = Color(0xE6101520),
         topLeft = Offset(tagLeft, tagTop),
         size = Size(tagWidth, tagHeight),
-        cornerRadius = CornerRadius(6f, 6f)
+        cornerRadius = CornerRadius(8f, 8f)
     )
-    // 태그 테두리
+    // 상단 하이라이트 (그라디언트)
     drawRoundRect(
-        color = AccentCyan.copy(alpha = 0.4f),
+        brush = Brush.verticalGradient(
+            colors = listOf(AccentCyan.copy(alpha = 0.08f), Color.Transparent),
+            startY = tagTop,
+            endY = tagTop + tagHeight * 0.4f
+        ),
         topLeft = Offset(tagLeft, tagTop),
         size = Size(tagWidth, tagHeight),
-        cornerRadius = CornerRadius(6f, 6f),
+        cornerRadius = CornerRadius(8f, 8f)
+    )
+    // 테두리
+    drawRoundRect(
+        color = AccentCyan.copy(alpha = 0.2f),
+        topLeft = Offset(tagLeft, tagTop),
+        size = Size(tagWidth, tagHeight),
+        cornerRadius = CornerRadius(8f, 8f),
         style = Stroke(width = 1f)
     )
-    // Accent bar
+
+    // ── 좌측 accent bar (그라디언트) ──
     drawRoundRect(
-        color = AccentCyan,
-        topLeft = Offset(tagLeft, tagTop + 4f),
-        size = Size(3f, tagHeight - 8f),
+        brush = Brush.verticalGradient(listOf(AccentCyan, ArTeal)),
+        topLeft = Offset(tagLeft + 1f, tagTop + 6f),
+        size = Size(3f, tagHeight - 12f),
         cornerRadius = CornerRadius(2f, 2f)
     )
 
-    // 타이틀
+    // ── 타이틀 ──
     drawText(
         textLayoutResult = titleResult,
-        topLeft = Offset(tagLeft + innerPadding, tagTop + padding)
+        topLeft = Offset(innerLeft + padding, tagTop + padding)
     )
-    // 설명
-    drawText(
-        textLayoutResult = descResult,
-        topLeft = Offset(tagLeft + innerPadding, tagTop + padding + titleResult.size.height + descSpacing)
-    )
+
+    // ── 구분선 + 설명 ──
+    if (descResult != null && separatorH > 0f) {
+        val lineY = tagTop + padding + titleResult.size.height + separatorH / 2
+        drawLine(
+            color = AccentCyan.copy(alpha = 0.15f),
+            start = Offset(innerLeft + padding, lineY),
+            end = Offset(tagLeft + tagWidth - padding, lineY),
+            strokeWidth = 0.5f
+        )
+        drawText(
+            textLayoutResult = descResult,
+            topLeft = Offset(innerLeft + padding, lineY + separatorH / 2 + 4f)
+        )
+    }
 }
 
-/** 4개 코너에 L자형 브래킷을 그린다. */
+// ════════════════════════════════════════════════════════════════
+// 로딩바 (탭 위치 아래 수평 프로그레스)
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * 화면 정중앙에 표시되는 로딩 인디케이터.
+ * 타원형 백배경 + "분석 중" + 순차 깜박이는 점 3개 + shimmer 프로그레스 바.
+ */
+private fun DrawScope.drawLoadingBar(
+    cx: Float, cy: Float,
+    shimmerProgress: Float,
+    textMeasurer: androidx.compose.ui.text.TextMeasurer,
+    dotCycle: Float
+) {
+    val barWidth = 220f
+    val barHeight = 5f
+
+    // "분석 중" 텍스트 (점 제외)
+    val labelResult = textMeasurer.measure(
+        text = "분석 중",
+        style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium, fontFamily = FontFamily.Monospace, color = AccentCyan)
+    )
+
+    // 점 3개 각각 측정 (alpha 다르게 그리기 위해)
+    val dotResults = (0..2).map { i ->
+        // 각 점이 순차적으로 밝아짐: 0번→1번→2번
+        val phase = (dotCycle - i * 0.25f).mod(1f)
+        val alpha = if (phase < 0.4f) 0.3f + (phase / 0.4f) * 0.7f else 1f - ((phase - 0.4f) / 0.6f) * 0.7f
+        val result = textMeasurer.measure(
+            text = ".",
+            style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, color = AccentCyan.copy(alpha = alpha.coerceIn(0.2f, 1f)))
+        )
+        result
+    }
+    val dotsWidth = dotResults.sumOf { it.size.width }
+
+    val totalTextW = labelResult.size.width + dotsWidth + 2f
+
+    // Pill 크기
+    val pillPadH = 28f
+    val pillPadV = 14f
+    val innerGap = 10f
+    val pillContentW = maxOf(barWidth, totalTextW.toFloat())
+    val pillW = pillContentW + pillPadH * 2
+    val pillH = labelResult.size.height + innerGap + barHeight + pillPadV * 2
+    val pillRadius = pillH / 2
+
+    val pillLeft = cx - pillW / 2
+    val pillTop = cy - pillH / 2
+
+    // ── 타원형 배경 ──
+    // 외부 글로우
+    drawRoundRect(
+        color = Color.Black.copy(alpha = 0.3f),
+        topLeft = Offset(pillLeft - 4f, pillTop - 4f),
+        size = Size(pillW + 8f, pillH + 8f),
+        cornerRadius = CornerRadius(pillRadius + 4f, pillRadius + 4f)
+    )
+    // 메인 배경
+    drawRoundRect(
+        color = Color(0xE60A0E18),
+        topLeft = Offset(pillLeft, pillTop),
+        size = Size(pillW, pillH),
+        cornerRadius = CornerRadius(pillRadius, pillRadius)
+    )
+    // 상단 하이라이트
+    drawRoundRect(
+        brush = Brush.verticalGradient(
+            listOf(AccentCyan.copy(alpha = 0.06f), Color.Transparent),
+            startY = pillTop, endY = pillTop + pillH * 0.5f
+        ),
+        topLeft = Offset(pillLeft, pillTop),
+        size = Size(pillW, pillH),
+        cornerRadius = CornerRadius(pillRadius, pillRadius)
+    )
+    // 테두리
+    drawRoundRect(
+        color = AccentCyan.copy(alpha = 0.3f),
+        topLeft = Offset(pillLeft, pillTop),
+        size = Size(pillW, pillH),
+        cornerRadius = CornerRadius(pillRadius, pillRadius),
+        style = Stroke(width = 1f)
+    )
+
+    // ── "분석 중" + 순차 깜박이는 점 ──
+    val textStartX = pillLeft + (pillW - totalTextW) / 2
+    val textY = pillTop + pillPadV
+    drawText(textLayoutResult = labelResult, topLeft = Offset(textStartX, textY))
+
+    var dotX = textStartX + labelResult.size.width + 2f
+    for (dotResult in dotResults) {
+        drawText(textLayoutResult = dotResult, topLeft = Offset(dotX, textY))
+        dotX += dotResult.size.width
+    }
+
+    // ── 프로그레스 바 ──
+    val barLeft = pillLeft + (pillW - barWidth) / 2
+    val barY = textY + labelResult.size.height + innerGap
+
+    // 트랙
+    drawRoundRect(
+        color = AccentCyan.copy(alpha = 0.12f),
+        topLeft = Offset(barLeft, barY),
+        size = Size(barWidth, barHeight),
+        cornerRadius = CornerRadius(barHeight / 2, barHeight / 2)
+    )
+
+    // Shimmer sweep
+    val shimmerW = barWidth * 0.3f
+    val shimmerStart = barLeft + barWidth * shimmerProgress - shimmerW / 2
+    val clampedStart = shimmerStart.coerceIn(barLeft, barLeft + barWidth - shimmerW)
+    val clampedEnd = (shimmerStart + shimmerW).coerceIn(barLeft, barLeft + barWidth)
+    val actualW = clampedEnd - clampedStart
+
+    if (actualW > 0f) {
+        drawRoundRect(
+            brush = Brush.horizontalGradient(
+                colors = listOf(Color.Transparent, AccentCyan.copy(alpha = 0.9f), ArTeal.copy(alpha = 0.7f), Color.Transparent),
+                startX = clampedStart, endX = clampedEnd
+            ),
+            topLeft = Offset(clampedStart, barY),
+            size = Size(actualW, barHeight),
+            cornerRadius = CornerRadius(barHeight / 2, barHeight / 2)
+        )
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+// 공통 헬퍼
+// ════════════════════════════════════════════════════════════════
+
 private fun DrawScope.drawCornerBrackets(
     left: Float, top: Float, width: Float, height: Float,
     cornerLen: Float, strokeW: Float, color: Color
 ) {
-    // Top-left
     drawLine(color, Offset(left, top), Offset(left + cornerLen, top), strokeW)
     drawLine(color, Offset(left, top), Offset(left, top + cornerLen), strokeW)
-    // Top-right
     drawLine(color, Offset(left + width, top), Offset(left + width - cornerLen, top), strokeW)
     drawLine(color, Offset(left + width, top), Offset(left + width, top + cornerLen), strokeW)
-    // Bottom-left
     drawLine(color, Offset(left, top + height), Offset(left + cornerLen, top + height), strokeW)
     drawLine(color, Offset(left, top + height), Offset(left, top + height - cornerLen), strokeW)
-    // Bottom-right
     drawLine(color, Offset(left + width, top + height), Offset(left + width - cornerLen, top + height), strokeW)
     drawLine(color, Offset(left + width, top + height), Offset(left + width, top + height - cornerLen), strokeW)
 }

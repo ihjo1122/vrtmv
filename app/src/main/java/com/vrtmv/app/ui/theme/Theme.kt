@@ -1,26 +1,30 @@
 package com.vrtmv.app.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
 
-/**
- * 앱 전역 Material3 테마.
- * minSdk 31(Android 12)이므로 항상 시스템 다이나믹 컬러를 사용한다.
- */
+private val VrtmvColorScheme = darkColorScheme(
+    primary = ArCyan,
+    secondary = ArTeal,
+    tertiary = ArDeepBlue,
+    background = SurfaceDark,
+    surface = SurfaceElevated,
+    surfaceVariant = SurfaceOverlay,
+    onPrimary = SurfaceDark,
+    onSecondary = SurfaceDark,
+    onBackground = TextPrimary,
+    onSurface = TextPrimary,
+    onSurfaceVariant = TextSecondary,
+    error = StatusError,
+    onError = TextPrimary
+)
+
 @Composable
-fun VrtmvTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    content: @Composable () -> Unit
-) {
-    val context = LocalContext.current
-    val colorScheme = if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-
+fun VrtmvTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = colorScheme,
+        colorScheme = VrtmvColorScheme,
+        typography = VrtmvTypography,
         content = content
     )
 }

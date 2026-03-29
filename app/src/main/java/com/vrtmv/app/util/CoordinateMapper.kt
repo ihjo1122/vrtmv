@@ -43,10 +43,10 @@ class CoordinateMapper(
      */
     fun mapToView(box: RectF): Rect {
         return Rect(
-            left = box.left * scale + offsetX,
-            top = box.top * scale + offsetY,
-            right = box.right * scale + offsetX,
-            bottom = box.bottom * scale + offsetY
+            left = (box.left * scale + offsetX).coerceIn(0f, viewWidth),
+            top = (box.top * scale + offsetY).coerceIn(0f, viewHeight),
+            right = (box.right * scale + offsetX).coerceIn(0f, viewWidth),
+            bottom = (box.bottom * scale + offsetY).coerceIn(0f, viewHeight)
         )
     }
 

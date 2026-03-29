@@ -24,11 +24,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -46,7 +48,6 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -56,7 +57,16 @@ import com.vrtmv.app.data.inference.VlmMode
 import com.vrtmv.app.ui.overlay.DetectionOverlay
 import com.vrtmv.app.ui.overlay.GazeCrosshair
 import com.vrtmv.app.ui.components.ResultCard
+import com.vrtmv.app.ui.theme.ArCyan
+import com.vrtmv.app.ui.theme.ArTeal
+import com.vrtmv.app.ui.theme.OverlayTagBg
+import com.vrtmv.app.ui.theme.StatusError
+import com.vrtmv.app.ui.theme.SurfaceDark
+import com.vrtmv.app.ui.theme.SurfaceElevated
+import com.vrtmv.app.ui.theme.TextPrimary
+import com.vrtmv.app.ui.theme.TextSecondary
 import java.util.concurrent.Executors
+
 @Composable
 fun CameraScreen(
     viewModel: CameraViewModel = hiltViewModel()
@@ -119,7 +129,6 @@ private fun CameraContent(viewModel: CameraViewModel) {
         }
     }
 
-    // CoordinateMapper는 ViewModel에서 생성하여 UiState에 포함 (이중 생성 방지)
     val coordinateMapper = uiState.coordinateMapper
 
     Box(
@@ -189,7 +198,7 @@ private fun CameraContent(viewModel: CameraViewModel) {
             modifier = Modifier.fillMaxSize()
         )
 
-        // Layer 2: AR overlay (객체 검출 or 장면 추론 시)
+        // Layer 2: AR overlay
         val showOverlay = coordinateMapper != null && (
             uiState.detectedObjects.isNotEmpty() ||
             (uiState.tapPoint != null && uiState.inferenceState !is com.vrtmv.app.domain.model.InferenceState.Idle)
@@ -222,14 +231,19 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 .padding(16.dp)
         )
 
-        // Layer 4.5: 추론 중지 버튼 (추론 중일 때 우상단 VLM 토글 아래)
-        if (uiState.inferenceState is com.vrtmv.app.domain.model.InferenceState.Loading) {
+        // Layer 4.5: Stop / Clear button
+        val showStopButton = uiState.inferenceState is com.vrtmv.app.domain.model.InferenceState.Loading
+        val showClearButton = uiState.inferenceState is com.vrtmv.app.domain.model.InferenceState.Success ||
+            uiState.inferenceState is com.vrtmv.app.domain.model.InferenceState.Error ||
+            (uiState.inferenceState is com.vrtmv.app.domain.model.InferenceState.Idle && uiState.selectedObject != null)
+
+        if (showStopButton) {
             FilledTonalIconButton(
                 onClick = { viewModel.clearSelection() },
                 shape = RoundedCornerShape(12.dp),
                 colors = IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = Color(0xCC000000),
-                    contentColor = Color(0xFFEF5350)
+                    containerColor = OverlayTagBg,
+                    contentColor = StatusError
                 ),
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -242,9 +256,28 @@ private fun CameraContent(viewModel: CameraViewModel) {
                     modifier = Modifier.size(22.dp)
                 )
             }
+        } else if (showClearButton) {
+            FilledTonalIconButton(
+                onClick = { viewModel.clearSelection() },
+                shape = RoundedCornerShape(12.dp),
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = SurfaceElevated.copy(alpha = 0.85f),
+                    contentColor = ArCyan
+                ),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 104.dp, end = 16.dp)
+                    .size(48.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "결과 지우기",
+                    modifier = Modifier.size(22.dp)
+                )
+            }
         }
 
-        // Layer 5: VLM mode toggle button (top-right)
+        // Layer 5: VLM mode toggle button
         VlmToggleButton(
             currentMode = uiState.vlmMode,
             onToggle = { viewModel.toggleVlmMode() },
@@ -253,14 +286,14 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 .padding(top = 48.dp, end = 16.dp)
         )
 
-        // Layer 6: 모델명 + 추론 시간 (top-left)
+        // Layer 6: Model name + inference time
         if (uiState.modelDisplayName.isNotEmpty()) {
             Row(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(top = 48.dp, start = 16.dp)
                     .background(
-                        Color.Black.copy(alpha = 0.6f),
+                        SurfaceElevated.copy(alpha = 0.8f),
                         RoundedCornerShape(8.dp)
                     )
                     .padding(horizontal = 10.dp, vertical = 6.dp),
@@ -269,43 +302,43 @@ private fun CameraContent(viewModel: CameraViewModel) {
             ) {
                 Text(
                     text = uiState.modelDisplayName,
-                    color = Color(0xFF00BCD4),
-                    fontSize = 11.sp
+                    color = ArCyan,
+                    style = MaterialTheme.typography.labelMedium
                 )
                 if (uiState.inferenceTimeMs > 0) {
                     val sec = (uiState.inferenceTimeMs + 500) / 1000
                     Text(
                         text = "약 ${sec}초",
-                        color = Color.White.copy(alpha = 0.7f),
-                        fontSize = 11.sp
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall
                     )
                 }
             }
         }
 
-        // Layer 7: 모델 로딩 스피너
+        // Layer 7: Model loading spinner
         if (modelLoading) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.7f)),
+                    .background(SurfaceDark.copy(alpha = 0.85f)),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(
-                        color = Color(0xFF00BCD4),
+                        color = ArCyan,
                         modifier = Modifier.size(48.dp)
                     )
                     Text(
                         text = "모델 초기화 중...",
-                        color = Color.White,
-                        fontSize = 14.sp,
+                        color = TextPrimary,
+                        style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(top = 16.dp)
                     )
                     Text(
                         text = uiState.modelDisplayName,
-                        color = Color(0xFF00BCD4),
-                        fontSize = 12.sp,
+                        color = ArCyan,
+                        style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier.padding(top = 4.dp)
                     )
                 }
@@ -321,7 +354,7 @@ private fun VlmToggleButton(
     modifier: Modifier = Modifier
 ) {
     val isOn = currentMode == VlmMode.ON
-    val containerColor = if (isOn) Color(0xFF00897B).copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.5f)
+    val containerColor = if (isOn) ArTeal.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.5f)
     val iconColor = if (isOn) Color.White else Color.White.copy(alpha = 0.5f)
 
     FilledTonalIconButton(
