@@ -36,3 +36,6 @@ local.properties
 
 # Android Profiling
 *.hprof
+
+# Model path remove
+model/
