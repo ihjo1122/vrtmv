@@ -72,11 +72,21 @@ class CameraViewModel @Inject constructor(
 
         _uiState.value = _uiState.value.copy(modelDisplayName = modelInfo.displayName)
 
-        // 모델 로드 (5-15초 소요 가능)
+        // 모델 로드 + 워밍업 (첫 추론 cold start 제거)
         viewModelScope.launch {
             Log.d(TAG, "모델 로드 시작: ${modelInfo.displayName}")
             val success = inferenceEngine.loadModel(modelInfo)
-            if (!success) {
+            if (success) {
+                // 워밍업: GPU 셰이더 컴파일 및 캐시 사전 로드
+                try {
+                    val warmup = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+                    inferenceEngine.describeScene(warmup)
+                    warmup.recycle()
+                    Log.d(TAG, "모델 워밍업 완료")
+                } catch (e: Exception) {
+                    Log.w(TAG, "워밍업 중 오류 (무시): ${e.message}")
+                }
+            } else {
                 Log.w(TAG, "모델 로드 실패: ${modelInfo.displayName}")
             }
             _modelLoading.value = false
@@ -185,8 +195,17 @@ class CameraViewModel @Inject constructor(
      * ROI 크롭 → 프롬프트 생성 → LLM 추론 → 결과 UI 반영.
      * 15초 타임아웃, IO 디스패처에서 비동기 실행.
      */
+    /** 현재 활성화된 DetectionManager 참조 (추론 중 프레임 중단용) */
+    private var activeDetectionManager: ObjectDetectionManager? = null
+
+    /** CameraScreen에서 detectionManager 참조 전달 */
+    fun bindDetectionManager(manager: ObjectDetectionManager) {
+        activeDetectionManager = manager
+    }
+
     private fun runInference(bitmap: Bitmap, obj: DetectedObject) {
         _uiState.value = _uiState.value.copy(inferenceState = InferenceState.Loading)
+        activeDetectionManager?.paused = true  // 추론 중 프레임 처리 중단
 
         inferenceJob = viewModelScope.launch {
             try {
@@ -206,12 +225,13 @@ class CameraViewModel @Inject constructor(
                     inferenceTimeMs = elapsed
                 )
             } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-                // 사용자 중지 — 상태 업데이트 안 함
                 Log.d(TAG, "▶ 추론 취소됨")
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     inferenceState = InferenceState.Error(e.message ?: "추론 실패")
                 )
+            } finally {
+                activeDetectionManager?.paused = false  // 프레임 처리 재개
             }
         }
     }
@@ -219,6 +239,7 @@ class CameraViewModel @Inject constructor(
     /** 전체 장면 추론. 객체 미검출 시 호출. */
     private fun runSceneInference(bitmap: Bitmap) {
         _uiState.value = _uiState.value.copy(inferenceState = InferenceState.Loading)
+        activeDetectionManager?.paused = true  // 추론 중 프레임 처리 중단
 
         inferenceJob = viewModelScope.launch {
             try {
@@ -240,6 +261,8 @@ class CameraViewModel @Inject constructor(
                 _uiState.value = _uiState.value.copy(
                     inferenceState = InferenceState.Error(e.message ?: "추론 실패")
                 )
+            } finally {
+                activeDetectionManager?.paused = false  // 프레임 처리 재개
             }
         }
     }
@@ -261,5 +284,6 @@ class CameraViewModel @Inject constructor(
         _uiState.value.capturedBitmap?.recycle()
         // GPU 메모리 해제 (카메라 화면 종료 시)
         inferenceEngine.release()
+        activeDetectionManager = null
     }
 }

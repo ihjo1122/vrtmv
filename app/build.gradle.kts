@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -5,6 +7,13 @@ plugins {
     alias(libs.plugins.hilt.android)
     alias(libs.plugins.ksp)
 }
+
+// local.properties에서 HF_TOKEN 읽기
+val localProps = rootProject.file("local.properties")
+val hfToken: String = if (localProps.exists()) {
+    Properties().apply { localProps.inputStream().use { load(it) } }
+        .getProperty("HF_TOKEN", "")
+} else ""
 
 android {
     namespace = "com.vrtmv.app"
@@ -16,6 +25,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+
+        buildConfigField("String", "HF_TOKEN", "\"$hfToken\"")
     }
 
     buildTypes {
@@ -39,6 +50,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

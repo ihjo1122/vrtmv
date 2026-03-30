@@ -36,6 +36,9 @@ class ObjectDetectionManager(private val context: Context) {
     private var latestBitmap: Bitmap? = null       // 최신 프레임 버퍼 (upright)
     private val bitmapLock = Any()                 // latestBitmap 동기화 락
 
+    private var frameSkipCounter = 0               // 프레임 스킵 카운터 (배터리 최적화)
+    @Volatile var paused: Boolean = false           // 추론 중 프레임 처리 중단 플래그
+
     init {
         setupDetector()
     }
@@ -68,6 +71,18 @@ class ObjectDetectionManager(private val context: Context) {
      * 검출은 수행하지 않는다 — detectNow()에서만 실행.
      */
     fun updateFrame(imageProxy: ImageProxy) {
+        // 추론 중이면 프레임 처리 완전 중단 (배터리 절약)
+        if (paused) {
+            imageProxy.close()
+            return
+        }
+
+        // 3프레임마다 1회만 처리 (~10fps, 배터리 최적화)
+        if (frameSkipCounter++ % 3 != 0) {
+            imageProxy.close()
+            return
+        }
+
         try {
             val rawBitmap = imageProxyToBitmap(imageProxy) ?: return
             val rotation = imageProxy.imageInfo.rotationDegrees

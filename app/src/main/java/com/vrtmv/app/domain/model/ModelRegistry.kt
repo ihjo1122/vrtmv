@@ -1,5 +1,7 @@
 package com.vrtmv.app.domain.model
 
+import com.vrtmv.app.BuildConfig
+
 /**
  * 사용 가능한 온디바이스 VLM 모델 목록을 관리한다.
  * 모델 추가/변경 시 이 파일만 수정하면 됨.

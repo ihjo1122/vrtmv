@@ -122,6 +122,11 @@ private fun CameraContent(viewModel: CameraViewModel) {
     val detectionManager = remember { ObjectDetectionManager(context) }
     val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
 
+    // 추론 중 프레임 처리 중단을 위해 ViewModel에 참조 전달
+    LaunchedEffect(detectionManager) {
+        viewModel.bindDetectionManager(detectionManager)
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             detectionManager.close()

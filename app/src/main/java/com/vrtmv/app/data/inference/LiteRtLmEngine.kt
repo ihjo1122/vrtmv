@@ -117,7 +117,10 @@ class LiteRtLmEngine @Inject constructor(
                 }
 
                 try {
-                    val imageBytes = bitmapToJpegBytes(image)
+                    val resized = resizeForVlm(image)
+                    val imageBytes = bitmapToJpegBytes(resized)
+                    if (resized != image) resized.recycle()
+
                     currentEngine.createConversation().use { conversation ->
                         val message = Message.of(
                             Content.ImageBytes(imageBytes),
@@ -158,9 +161,25 @@ class LiteRtLmEngine @Inject constructor(
         modelAvailable = null
     }
 
+    /**
+     * VLM 입력 최적화: 최대 512px로 리사이즈.
+     * Gemma 3n 비전 인코더 내부적으로 224~256px 사용하므로 512px 이상은 불필요.
+     */
+    private fun resizeForVlm(bitmap: Bitmap, maxDim: Int = 512): Bitmap {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w <= maxDim && h <= maxDim) return bitmap
+
+        val scale = maxDim.toFloat() / maxOf(w, h)
+        val newW = (w * scale).toInt().coerceAtLeast(1)
+        val newH = (h * scale).toInt().coerceAtLeast(1)
+        Log.d(TAG, "이미지 리사이즈: ${w}x${h} → ${newW}x${newH}")
+        return Bitmap.createScaledBitmap(bitmap, newW, newH, true)
+    }
+
     private fun bitmapToJpegBytes(bitmap: Bitmap): ByteArray {
-        val stream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+        val stream = ByteArrayOutputStream(bitmap.width * bitmap.height / 4)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 75, stream)
         return stream.toByteArray()
     }
 }
