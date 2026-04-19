@@ -33,22 +33,12 @@ import com.vrtmv.app.ui.theme.ArTeal
 import com.vrtmv.app.ui.theme.OverlayCyanBright
 import com.vrtmv.app.ui.theme.OverlayCyanDim
 import com.vrtmv.app.ui.theme.OverlayCyanFill
-import com.vrtmv.app.ui.theme.OverlayTagBg
-import com.vrtmv.app.ui.theme.OverlayTagBgSelected
-import com.vrtmv.app.ui.theme.OverlayUnselected
 import com.vrtmv.app.ui.theme.StatusError
 import com.vrtmv.app.util.CoordinateMapper
 
 private val AccentCyan = OverlayCyanBright
 private val AccentCyanDim = OverlayCyanDim
 private val AccentCyanFill = OverlayCyanFill
-private val UnselectedColor = OverlayUnselected
-private val TagBackground = OverlayTagBg
-private val TagBgSelected = OverlayTagBgSelected
-
-// 로딩바 크기
-private const val LOADING_BAR_WIDTH = 180f
-private const val LOADING_BAR_HEIGHT = 4f
 
 @Composable
 fun DetectionOverlay(
@@ -89,31 +79,20 @@ fun DetectionOverlay(
     )
 
     Canvas(modifier = modifier) {
-        for (obj in detectedObjects) {
+        // 추론 모드에서는 미선택 박스/라벨 노출을 생략 — 선택 객체만 강조.
+        selectedObject?.let { obj ->
             val viewRect = coordinateMapper.mapToView(obj.boundingBox)
-            val isSelected = obj == selectedObject
-
-            if (isSelected) {
-                drawSelectedObject(
-                    obj = obj,
-                    left = viewRect.left, top = viewRect.top,
-                    width = viewRect.width, height = viewRect.height,
-                    scanProgress = scanProgress,
-                    cornerPulse = cornerPulse,
-                    inferenceState = inferenceState,
-                    textMeasurer = textMeasurer,
-                    shimmerProgress = shimmerProgress,
-                    dotCycle = dotCycle
-                )
-            } else {
-                drawUnselectedObject(
-                    obj = obj,
-                    left = viewRect.left, top = viewRect.top,
-                    width = viewRect.width, height = viewRect.height,
-                    cornerPulse = cornerPulse,
-                    textMeasurer = textMeasurer
-                )
-            }
+            drawSelectedObject(
+                obj = obj,
+                left = viewRect.left, top = viewRect.top,
+                width = viewRect.width, height = viewRect.height,
+                scanProgress = scanProgress,
+                cornerPulse = cornerPulse,
+                inferenceState = inferenceState,
+                textMeasurer = textMeasurer,
+                shimmerProgress = shimmerProgress,
+                dotCycle = dotCycle
+            )
         }
 
         // 객체 미선택 + 터치 좌표 → 장면 추론 태그
@@ -194,44 +173,6 @@ private fun DrawScope.drawSelectedObject(
             textMeasurer = textMeasurer
         )
     }
-}
-
-// ════════════════════════════════════════════════════════════════
-// 미선택 객체
-// ════════════════════════════════════════════════════════════════
-
-private fun DrawScope.drawUnselectedObject(
-    obj: DetectedObject,
-    left: Float, top: Float, width: Float, height: Float,
-    cornerPulse: Float,
-    textMeasurer: androidx.compose.ui.text.TextMeasurer
-) {
-    val cornerLen = minOf(width, height) * 0.15f
-    val c = UnselectedColor.copy(alpha = cornerPulse * 0.7f)
-
-    drawRoundRect(
-        color = Color.White.copy(alpha = 0.03f),
-        topLeft = Offset(left, top),
-        size = Size(width, height),
-        cornerRadius = CornerRadius(4f, 4f)
-    )
-    drawCornerBrackets(left, top, width, height, cornerLen, 1.5f, c)
-
-    // Label chip
-    val chipText = "${obj.label}  ${(obj.confidence * 100).toInt()}%"
-    val textResult = textMeasurer.measure(
-        text = chipText,
-        style = TextStyle(fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = Color.White.copy(alpha = 0.7f))
-    )
-    val chipPadH = 6f
-    val chipPadV = 3f
-    val chipW = textResult.size.width + chipPadH * 2
-    val chipH = textResult.size.height + chipPadV * 2
-    val chipTop = top - chipH - 2f
-
-    drawRoundRect(color = TagBackground, topLeft = Offset(left, chipTop), size = Size(chipW, chipH), cornerRadius = CornerRadius(4f, 4f))
-    drawRoundRect(color = UnselectedColor.copy(alpha = 0.2f), topLeft = Offset(left, chipTop), size = Size(chipW, chipH), cornerRadius = CornerRadius(4f, 4f), style = Stroke(0.5f))
-    drawText(textLayoutResult = textResult, topLeft = Offset(left + chipPadH, chipTop + chipPadV))
 }
 
 // ════════════════════════════════════════════════════════════════

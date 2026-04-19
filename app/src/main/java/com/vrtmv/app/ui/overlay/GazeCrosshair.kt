@@ -11,6 +11,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
+import com.vrtmv.app.ui.theme.ArCyan
 import com.vrtmv.app.ui.theme.CrosshairGold
 import kotlin.math.cos
 import kotlin.math.sin
@@ -90,5 +91,50 @@ fun GazeCrosshair(
                 CROSSHAIR_STROKE_WIDTH * 0.8f
             )
         }
+    }
+}
+
+/**
+ * 포인팅 홀드 진행률 링.
+ * 사용자가 검지로 포인팅하는 동안 0~1초 동안 차오르는 원호로 피드백 제공.
+ */
+@Composable
+fun PointingProgressRing(
+    position: Offset,
+    progress: Float,
+    modifier: Modifier = Modifier
+) {
+    val color = ArCyan
+    val radius = 34f
+    val stroke = 4f
+
+    Canvas(modifier = modifier) {
+        // 배경 링 (반투명)
+        drawCircle(
+            color = color.copy(alpha = 0.25f),
+            radius = radius,
+            center = position,
+            style = Stroke(width = stroke)
+        )
+
+        // 진행 아크 — 12시 방향에서 시작하여 시계방향
+        if (progress > 0f) {
+            drawArc(
+                color = color,
+                startAngle = -90f,
+                sweepAngle = progress * 360f,
+                useCenter = false,
+                topLeft = Offset(position.x - radius, position.y - radius),
+                size = androidx.compose.ui.geometry.Size(radius * 2, radius * 2),
+                style = Stroke(width = stroke)
+            )
+        }
+
+        // 중앙 점
+        drawCircle(
+            color = color,
+            radius = 4f,
+            center = position
+        )
     }
 }

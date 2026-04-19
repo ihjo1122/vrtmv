@@ -6,6 +6,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.vrtmv.app.domain.model.DetectorKind
 import com.vrtmv.app.domain.model.ModelRegistry
 import com.vrtmv.app.ui.camera.CameraScreen
 import com.vrtmv.app.ui.intro.IntroScreen
@@ -14,9 +15,9 @@ import com.vrtmv.app.ui.main.MainScreen
 object NavRoutes {
     const val INTRO = "intro"
     const val MAIN = "main"
-    const val CAMERA = "camera/{modelId}"
+    const val CAMERA = "camera/{modelId}/{detectorId}"
 
-    fun cameraRoute(modelId: String) = "camera/$modelId"
+    fun cameraRoute(modelId: String, detectorId: String) = "camera/$modelId/$detectorId"
 }
 
 @Composable
@@ -39,8 +40,8 @@ fun AppNavHost() {
 
         composable(NavRoutes.MAIN) {
             MainScreen(
-                onNavigateToCamera = { modelId ->
-                    navController.navigate(NavRoutes.cameraRoute(modelId))
+                onNavigateToCamera = { modelId, detectorId ->
+                    navController.navigate(NavRoutes.cameraRoute(modelId, detectorId))
                 }
             )
         }
@@ -51,6 +52,10 @@ fun AppNavHost() {
                 navArgument("modelId") {
                     type = NavType.StringType
                     defaultValue = ModelRegistry.DEFAULT_MODEL_ID
+                },
+                navArgument("detectorId") {
+                    type = NavType.StringType
+                    defaultValue = DetectorKind.MEDIAPIPE.id
                 }
             )
         ) {

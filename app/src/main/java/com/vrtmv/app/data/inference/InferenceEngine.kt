@@ -27,6 +27,12 @@ interface InferenceEngine {
     /** 모델을 로드한다. 기본 구현은 no-op. */
     suspend fun loadModel(modelInfo: com.vrtmv.app.domain.model.ModelInfo): Boolean = true
 
+    /**
+     * 유휴 언로드 후 필요 시 다시 로드한다. 이미 로드돼 있으면 즉시 반환.
+     * 마지막으로 `loadModel()`로 지정된 모델을 재사용한다.
+     */
+    suspend fun ensureLoaded(): Boolean = true
+
     /** 리소스를 해제한다. 기본 구현은 no-op. */
     fun release() {}
 }

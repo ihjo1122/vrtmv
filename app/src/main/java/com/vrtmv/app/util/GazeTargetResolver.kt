@@ -14,7 +14,8 @@ import kotlin.math.sqrt
  */
 object GazeTargetResolver {
 
-    /** 최근접 탐색 시 최대 허용 거리 (픽셀) */
+    // FHD+ 화면 기준 ~7% 거리. 고정 픽셀이므로 저해상도 기기에서는 상대적으로 커짐.
+    // TODO: DP 기반 상대 단위로 변환해 기기 해상도 독립성 확보.
     private const val MAX_DISTANCE_THRESHOLD = 150f
 
     /**

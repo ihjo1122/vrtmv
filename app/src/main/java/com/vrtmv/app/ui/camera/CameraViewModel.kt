@@ -1,21 +1,27 @@
 package com.vrtmv.app.ui.camera
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
 import androidx.compose.ui.geometry.Offset
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.vrtmv.app.data.detection.ObjectDetectionManager
+import com.vrtmv.app.data.detection.DetectionProvider
+import com.vrtmv.app.data.detection.DetectionProviderRegistry
+import com.vrtmv.app.data.detection.HandGestureDetector
 import com.vrtmv.app.data.inference.InferenceEngine
 import com.vrtmv.app.data.inference.VlmMode
 import com.vrtmv.app.domain.model.DetectedObject
+import com.vrtmv.app.domain.model.DetectorKind
 import com.vrtmv.app.domain.model.InferenceState
+import com.vrtmv.app.domain.model.ModelRegistry
+import com.vrtmv.app.util.AssetPathResolver
 import com.vrtmv.app.util.CoordinateMapper
 import com.vrtmv.app.util.GazeTargetResolver
 import com.vrtmv.app.util.RoiCropper
-import androidx.lifecycle.SavedStateHandle
-import com.vrtmv.app.domain.model.ModelRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,7 +45,12 @@ data class CameraUiState(
     val vlmMode: VlmMode = VlmMode.OFF,
     val coordinateMapper: CoordinateMapper? = null,
     val modelDisplayName: String = "",
-    val inferenceTimeMs: Long = 0L
+    val detectorDisplayName: String = "",
+    val inferenceTimeMs: Long = 0L,
+    /** 포인팅 홀드 중 검지 끝 위치 (정규화 0~1) — UI 피드백용 */
+    val pointingPosition: Offset? = null,
+    /** 포인팅 홀드 진행률 0~1, 1.0 도달 시 onTapDetect 자동 발화 */
+    val pointingProgress: Float = 0f
 )
 
 /**
@@ -49,6 +60,9 @@ data class CameraUiState(
 @HiltViewModel
 class CameraViewModel @Inject constructor(
     private val inferenceEngine: InferenceEngine,
+    private val assetPathResolver: AssetPathResolver,
+    private val detectionProviderRegistry: DetectionProviderRegistry,
+    @ApplicationContext private val appContext: Context,
     savedStateHandle: SavedStateHandle
 ) : ViewModel() {
 
@@ -57,41 +71,36 @@ class CameraViewModel @Inject constructor(
 
     private var inferenceJob: Job? = null
 
-    /** 모델 로딩 완료 여부 */
-    private val _modelLoading = MutableStateFlow(true)
+    /**
+     * 모델 로딩 완료 여부.
+     * Intro 단계에서 이미 loadModel + 워밍업이 수행되므로 Camera 진입 시점에는 항상 false.
+     * 과거 호환을 위해 필드는 유지하지만 항상 준비된 상태.
+     */
+    private val _modelLoading = MutableStateFlow(false)
     val modelLoading: StateFlow<Boolean> = _modelLoading.asStateFlow()
+
+    /** 선택된 검출기 구현체 — Registry에서 캐시된 Singleton 인스턴스를 획득 */
+    val detectionProvider: DetectionProvider
 
     companion object {
         private const val TAG = "CameraVM"
     }
 
     init {
-        // Navigation argument에서 modelId 읽기
+        // Navigation argument에서 modelId / detectorId 읽기
         val modelId = savedStateHandle.get<String>("modelId") ?: ModelRegistry.DEFAULT_MODEL_ID
         val modelInfo = ModelRegistry.getModel(modelId) ?: ModelRegistry.getDefaultModel()
 
-        _uiState.value = _uiState.value.copy(modelDisplayName = modelInfo.displayName)
+        val detectorKind = DetectorKind.fromId(savedStateHandle.get<String>("detectorId"))
+        detectionProvider = detectionProviderRegistry.get(detectorKind)
+        // Registry Singleton은 재사용되므로 이전 세션 paused 플래그를 초기화
+        detectionProvider.paused = false
+        Log.i(TAG, "검출기 선택: ${detectorKind.displayName}")
 
-        // 모델 로드 + 워밍업 (첫 추론 cold start 제거)
-        viewModelScope.launch {
-            Log.d(TAG, "모델 로드 시작: ${modelInfo.displayName}")
-            val success = inferenceEngine.loadModel(modelInfo)
-            if (success) {
-                // 워밍업: GPU 셰이더 컴파일 및 캐시 사전 로드
-                try {
-                    val warmup = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
-                    inferenceEngine.describeScene(warmup)
-                    warmup.recycle()
-                    Log.d(TAG, "모델 워밍업 완료")
-                } catch (e: Exception) {
-                    Log.w(TAG, "워밍업 중 오류 (무시): ${e.message}")
-                }
-            } else {
-                Log.w(TAG, "모델 로드 실패: ${modelInfo.displayName}")
-            }
-            _modelLoading.value = false
-            Log.d(TAG, "모델 로드 완료: ${modelInfo.displayName}, success=$success")
-        }
+        _uiState.value = _uiState.value.copy(
+            modelDisplayName = modelInfo.displayName,
+            detectorDisplayName = detectorKind.displayName
+        )
     }
 
     /** VLM 모드 토글 (OFF ↔ ON) */
@@ -101,148 +110,81 @@ class CameraViewModel @Inject constructor(
     }
 
     /**
-     * 사용자 터치 시 호출.
-     * 1) 현재 프레임에서 객체 검출
-     * 2) 터치 좌표에 해당하는 객체 선택
-     * 3) VLM ON이면 온디바이스 추론 실행
+     * 사용자 터치 시 호출 — 객체 검출 후 탭 좌표의 객체를 크롭하여 VLM에 전달.
+     * detectNow() → GazeTargetResolver.resolve() → 매칭 시 RoiCropper.crop() + describe(),
+     * 미매칭 시 describeScene(frame) fallback. OFF 모드에서도 검출 실행하여 오버레이 표시.
      */
     fun onTapDetect(
         tapPoint: Offset,
-        detectionManager: ObjectDetectionManager,
         viewWidth: Float,
         viewHeight: Float
     ) {
-        // 추론 중이면 터치 무시
+        if (_modelLoading.value) {
+            Log.d(TAG, "▶ 모델 로딩 중 — 탭 무시")
+            return
+        }
         if (_uiState.value.inferenceState is InferenceState.Loading) {
-            Log.d(TAG, "▶ 추론 중 — 터치 무시")
+            Log.d(TAG, "▶ 추론 중 — 탭 무시")
             return
         }
 
-        inferenceJob?.cancel()
-
-        val result = detectionManager.detectNow() ?: run {
-            Log.w(TAG, "▶ detectNow() 반환 null — 프레임 없음")
+        // 검출 실행 — 실패 시 captureFrame fallback
+        val detectionResult = detectionProvider.detectNow()
+        val frame = detectionResult?.bitmap ?: detectionProvider.captureFrame() ?: run {
+            Log.w(TAG, "▶ 프레임 없음 — 탭 무시")
             return
         }
-
-        Log.d(TAG, "════════════════════════════════════════")
-        Log.d(TAG, "▶ TAP: (${tapPoint.x}, ${tapPoint.y})")
-        Log.d(TAG, "▶ VIEW: ${viewWidth} x ${viewHeight}")
-        Log.d(TAG, "▶ IMAGE: ${result.imageWidth} x ${result.imageHeight}")
-        Log.d(TAG, "▶ 검출 객체: ${result.objects.size}개")
+        val objects = detectionResult?.objects ?: emptyList()
 
         val mapper = CoordinateMapper(
-            imageWidth = result.imageWidth,
-            imageHeight = result.imageHeight,
+            imageWidth = frame.width,
+            imageHeight = frame.height,
             viewWidth = viewWidth,
             viewHeight = viewHeight
         )
 
-        // 좌표 매핑 디버그 로그
-        Log.d(TAG, "▶ MAPPER: scale=${mapper.debugScale()}, offset=(${mapper.debugOffsetX()}, ${mapper.debugOffsetY()})")
+        // 탭 좌표에 해당하는 객체 선택
+        val resolved = GazeTargetResolver.resolve(tapPoint, objects, mapper)
 
-        result.objects.forEachIndexed { i, obj ->
-            val viewRect = mapper.mapToView(obj.boundingBox)
-            Log.d(TAG, "  [$i] ${obj.label}(${(obj.confidence * 100).toInt()}%)" +
-                " img=(${obj.boundingBox.left.toInt()},${obj.boundingBox.top.toInt()},${obj.boundingBox.right.toInt()},${obj.boundingBox.bottom.toInt()})" +
-                " → view=(${viewRect.left.toInt()},${viewRect.top.toInt()},${viewRect.right.toInt()},${viewRect.bottom.toInt()})" +
-                " contains=${viewRect.contains(tapPoint)}")
-        }
-
-        val selected = GazeTargetResolver.resolve(
-            gazePoint = tapPoint,
-            detectedObjects = result.objects,
-            coordinateMapper = mapper
-        )
-
-        Log.d(TAG, "▶ SELECTED: ${selected?.label ?: "없음"}")
-        Log.d(TAG, "════════════════════════════════════════")
-
+        val vlmOn = _uiState.value.vlmMode == VlmMode.ON
         val oldBitmap = _uiState.value.capturedBitmap
-
         _uiState.value = _uiState.value.copy(
-            detectedObjects = result.objects,
-            selectedObject = selected,
+            detectedObjects = objects,
+            selectedObject = resolved,
             tapPoint = tapPoint,
-            capturedBitmap = result.bitmap,
-            imageWidth = result.imageWidth,
-            imageHeight = result.imageHeight,
+            capturedBitmap = frame,
+            imageWidth = frame.width,
+            imageHeight = frame.height,
             coordinateMapper = mapper,
-            inferenceState = if (selected != null) {
-                InferenceState.Success(
-                    "${selected.label} (${(selected.confidence * 100).toInt()}%)"
-                )
-            } else {
-                InferenceState.Idle
-            }
+            inferenceState = if (vlmOn) InferenceState.Loading else InferenceState.Idle
         )
-
-        // 새 상태 설정 후 이전 비트맵 해제
         oldBitmap?.recycle()
 
-        // VLM ON이면 추론 실행
-        if (_uiState.value.vlmMode == VlmMode.ON) {
-            if (selected != null) {
-                runInference(result.bitmap, selected)
-            } else {
-                runSceneInference(result.bitmap)
-            }
+        if (!vlmOn) return
+
+        if (resolved != null) {
+            val crop = RoiCropper.crop(frame, resolved.boundingBox)
+            runObjectInference(crop, resolved.label, resolved.confidence)
+        } else {
+            runSceneInference(frame)
         }
     }
 
-    /**
-     * 온디바이스 VLM 추론을 실행한다.
-     * ROI 크롭 → 프롬프트 생성 → LLM 추론 → 결과 UI 반영.
-     * 15초 타임아웃, IO 디스패처에서 비동기 실행.
-     */
-    /** 현재 활성화된 DetectionManager 참조 (추론 중 프레임 중단용) */
-    private var activeDetectionManager: ObjectDetectionManager? = null
-
-    /** CameraScreen에서 detectionManager 참조 전달 */
-    fun bindDetectionManager(manager: ObjectDetectionManager) {
-        activeDetectionManager = manager
-    }
-
-    private fun runInference(bitmap: Bitmap, obj: DetectedObject) {
-        _uiState.value = _uiState.value.copy(inferenceState = InferenceState.Loading)
-        activeDetectionManager?.paused = true  // 추론 중 프레임 처리 중단
-
-        inferenceJob = viewModelScope.launch {
-            try {
-                val cropped = RoiCropper.crop(bitmap, obj.boundingBox)
-
-                val startTime = System.currentTimeMillis()
-                val description = withTimeout(60_000) {
-                    inferenceEngine.describe(cropped, obj.label, obj.confidence)
-                }
-                val elapsed = System.currentTimeMillis() - startTime
-
-                cropped.recycle()
-                Log.d(TAG, "▶ 추론 완료: ${elapsed}ms")
-
-                _uiState.value = _uiState.value.copy(
-                    inferenceState = InferenceState.Success(description),
-                    inferenceTimeMs = elapsed
-                )
-            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-                Log.d(TAG, "▶ 추론 취소됨")
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    inferenceState = InferenceState.Error(e.message ?: "추론 실패")
-                )
-            } finally {
-                activeDetectionManager?.paused = false  // 프레임 처리 재개
-            }
-        }
-    }
-
-    /** 전체 장면 추론. 객체 미검출 시 호출. */
+    /** 전체 장면 추론. 캡처된 프레임을 그대로 VLM에 전달. */
     private fun runSceneInference(bitmap: Bitmap) {
-        _uiState.value = _uiState.value.copy(inferenceState = InferenceState.Loading)
-        activeDetectionManager?.paused = true  // 추론 중 프레임 처리 중단
+        inferenceJob?.cancel()
+        // GPU/CPU를 VLM decode에 온전히 할당
+        detectionProvider.paused = true
 
         inferenceJob = viewModelScope.launch {
             try {
+                // 유휴 언로드 후 재진입이면 hot reload. cacheDir 덕분에 cold start보다 짧다.
+                if (!inferenceEngine.ensureLoaded()) {
+                    _uiState.value = _uiState.value.copy(
+                        inferenceState = InferenceState.Error("모델이 로드되지 않았습니다")
+                    )
+                    return@launch
+                }
                 val startTime = System.currentTimeMillis()
                 val description = withTimeout(60_000) {
                     inferenceEngine.describeScene(bitmap)
@@ -262,8 +204,186 @@ class CameraViewModel @Inject constructor(
                     inferenceState = InferenceState.Error(e.message ?: "추론 실패")
                 )
             } finally {
-                activeDetectionManager?.paused = false  // 프레임 처리 재개
+                detectionProvider.paused = false
             }
+        }
+    }
+
+    /** 객체 크롭 추론. 검출 라벨을 힌트로 포함하여 describe() 호출. */
+    private fun runObjectInference(crop: Bitmap, label: String, confidence: Float) {
+        inferenceJob?.cancel()
+        detectionProvider.paused = true
+        inferenceJob = viewModelScope.launch {
+            try {
+                if (!inferenceEngine.ensureLoaded()) {
+                    crop.recycle()
+                    _uiState.value = _uiState.value.copy(
+                        inferenceState = InferenceState.Error("모델이 로드되지 않았습니다")
+                    )
+                    return@launch
+                }
+                val startTime = System.currentTimeMillis()
+                val description = withTimeout(60_000) {
+                    inferenceEngine.describe(crop, label, confidence)
+                }
+                val elapsed = System.currentTimeMillis() - startTime
+                crop.recycle()
+                Log.d(TAG, "▶ 객체 추론 완료: ${elapsed}ms label=$label")
+                _uiState.value = _uiState.value.copy(
+                    inferenceState = InferenceState.Success(description),
+                    inferenceTimeMs = elapsed
+                )
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                crop.recycle()
+                Log.d(TAG, "▶ 객체 추론 취소됨")
+            } catch (e: Exception) {
+                crop.recycle()
+                _uiState.value = _uiState.value.copy(
+                    inferenceState = InferenceState.Error(e.message ?: "추론 실패")
+                )
+            } finally {
+                detectionProvider.paused = false
+            }
+        }
+    }
+
+    /**
+     * CameraScreen에서 Composable 내 `remember` 로 HandGestureDetector 인스턴스를 생성할 때
+     * 사용하는 팩토리. AssetPathResolver 주입을 ViewModel로 일원화.
+     */
+    fun createGestureDetector(
+        onUpdate: (Float, Float, Float) -> Unit,
+        onConfirmed: (Float, Float) -> Unit,
+        onLost: () -> Unit
+    ): HandGestureDetector = HandGestureDetector(
+        context = appContext,
+        assetPathResolver = assetPathResolver,
+        onPointingUpdate = onUpdate,
+        onPointingConfirmed = onConfirmed,
+        onPointingLost = onLost
+    )
+
+    /** 제스처 포인팅 업데이트 — HandGestureDetector 콜백 */
+    fun onPointingUpdate(normX: Float, normY: Float, progress: Float) {
+        if (_uiState.value.inferenceState is InferenceState.Loading) return
+        _uiState.value = _uiState.value.copy(
+            pointingPosition = Offset(normX, normY),
+            pointingProgress = progress
+        )
+    }
+
+    /**
+     * 제스처 홀드 완료 — 객체 검출 후 포인팅 좌표의 객체를 크롭하여 VLM에 전달.
+     * "person" 라벨은 필터링 (본인 손 오탐 차단). 미매칭 시 35% 크롭 fallback.
+     */
+    fun onPointingConfirmed(normX: Float, normY: Float, viewWidth: Float, viewHeight: Float) {
+        if (_modelLoading.value) {
+            Log.d(TAG, "▶ 모델 로딩 중 — 제스처 무시")
+            _uiState.value = _uiState.value.copy(pointingPosition = null, pointingProgress = 0f)
+            return
+        }
+        if (_uiState.value.inferenceState is InferenceState.Loading) return
+
+        // 검출 실행 — 실패 시 captureFrame fallback
+        val detectionResult = detectionProvider.detectNow()
+        val frame = detectionResult?.bitmap ?: detectionProvider.captureFrame() ?: run {
+            Log.w(TAG, "▶ 제스처 추론: 프레임 없음")
+            _uiState.value = _uiState.value.copy(pointingPosition = null, pointingProgress = 0f)
+            return
+        }
+
+        // "person" 필터링: 제스처 시 본인 손이 "person"으로 오탐되는 문제 차단
+        val filteredObjects = (detectionResult?.objects ?: emptyList())
+            .filter { it.label != "person" }
+
+        val screenPoint = Offset(normX * viewWidth, normY * viewHeight)
+        val mapper = CoordinateMapper(
+            imageWidth = frame.width,
+            imageHeight = frame.height,
+            viewWidth = viewWidth,
+            viewHeight = viewHeight
+        )
+
+        // 포인팅 좌표에 해당하는 객체 선택
+        val resolved = GazeTargetResolver.resolve(screenPoint, filteredObjects, mapper)
+
+        val vlmOn = _uiState.value.vlmMode == VlmMode.ON
+        val oldBitmap = _uiState.value.capturedBitmap
+        _uiState.value = _uiState.value.copy(
+            detectedObjects = filteredObjects,
+            selectedObject = resolved,
+            tapPoint = screenPoint,
+            capturedBitmap = frame,
+            imageWidth = frame.width,
+            imageHeight = frame.height,
+            coordinateMapper = mapper,
+            pointingPosition = null,
+            pointingProgress = 0f,
+            inferenceState = if (vlmOn) InferenceState.Loading else InferenceState.Idle
+        )
+        oldBitmap?.recycle()
+
+        if (!vlmOn) return
+
+        if (resolved != null) {
+            val crop = RoiCropper.crop(frame, resolved.boundingBox)
+            runObjectInference(crop, resolved.label, resolved.confidence)
+        } else {
+            // 미매칭 fallback: 포인팅 중심 35% 크롭
+            val cropSize = (minOf(frame.width, frame.height) * 0.35f).toInt().coerceAtLeast(64)
+            val cx = (normX * frame.width).toInt()
+            val cy = (normY * frame.height).toInt()
+            val left = (cx - cropSize / 2).coerceIn(0, frame.width - cropSize)
+            val top = (cy - cropSize / 2).coerceIn(0, frame.height - cropSize)
+            val w = cropSize.coerceAtMost(frame.width - left)
+            val h = cropSize.coerceAtMost(frame.height - top)
+            val crop = Bitmap.createBitmap(frame, left, top, w, h)
+            runCroppedInference(crop)
+        }
+    }
+
+    /** 제스처 경로용: 이미 크롭된 비트맵을 describeScene에 전달. */
+    private fun runCroppedInference(crop: Bitmap) {
+        inferenceJob?.cancel()
+        detectionProvider.paused = true
+        inferenceJob = viewModelScope.launch {
+            try {
+                if (!inferenceEngine.ensureLoaded()) {
+                    crop.recycle()
+                    _uiState.value = _uiState.value.copy(
+                        inferenceState = InferenceState.Error("모델이 로드되지 않았습니다")
+                    )
+                    return@launch
+                }
+                val startTime = System.currentTimeMillis()
+                val description = withTimeout(60_000) {
+                    inferenceEngine.describeScene(crop)
+                }
+                val elapsed = System.currentTimeMillis() - startTime
+                crop.recycle()
+                Log.d(TAG, "▶ 제스처 추론 완료: ${elapsed}ms")
+                _uiState.value = _uiState.value.copy(
+                    inferenceState = InferenceState.Success(description),
+                    inferenceTimeMs = elapsed
+                )
+            } catch (e: kotlin.coroutines.cancellation.CancellationException) {
+                crop.recycle()
+                Log.d(TAG, "▶ 제스처 추론 취소됨")
+            } catch (e: Exception) {
+                crop.recycle()
+                _uiState.value = _uiState.value.copy(
+                    inferenceState = InferenceState.Error(e.message ?: "추론 실패")
+                )
+            } finally {
+                detectionProvider.paused = false
+            }
+        }
+    }
+
+    /** 제스처 소실 — 진행 링 초기화 */
+    fun onPointingLost() {
+        if (_uiState.value.pointingPosition != null) {
+            _uiState.value = _uiState.value.copy(pointingPosition = null, pointingProgress = 0f)
         }
     }
 
@@ -273,17 +393,21 @@ class CameraViewModel @Inject constructor(
         val oldBitmap = _uiState.value.capturedBitmap
         _uiState.value = CameraUiState(
             vlmMode = _uiState.value.vlmMode,
-            modelDisplayName = _uiState.value.modelDisplayName
+            modelDisplayName = _uiState.value.modelDisplayName,
+            detectorDisplayName = _uiState.value.detectorDisplayName
         )
         oldBitmap?.recycle()
     }
 
-    /** ViewModel 소멸 시 비트맵 + 엔진 메모리 해제 */
+    /**
+     * ViewModel 소멸 시 캡처 비트맵만 해제.
+     * InferenceEngine과 DetectionProvider는 Singleton이므로 Camera 재진입 시 재사용된다.
+     * 다음 진입 시 paused 플래그만 init에서 초기화.
+     */
     override fun onCleared() {
         super.onCleared()
         _uiState.value.capturedBitmap?.recycle()
-        // GPU 메모리 해제 (카메라 화면 종료 시)
-        inferenceEngine.release()
-        activeDetectionManager = null
+        // 검출기는 Singleton이므로 Analyzer가 종료된 후 프레임 처리를 중단하도록 paused 플래그만 세팅
+        detectionProvider.paused = true
     }
 }

@@ -15,18 +15,18 @@ import com.vrtmv.app.domain.model.DetectedObject
 import java.nio.ByteBuffer
 
 /**
- * 온디맨드 객체 검출 관리자.
+ * MediaPipe EfficientDet-Lite2 기반 온디맨드 객체 검출기.
  *
  * 카메라에서 매 프레임을 버퍼링하고(updateFrame),
  * 사용자가 터치할 때만 검출을 실행한다(detectNow).
  *
  * 프레임은 저장 시점에 회전이 적용되어 항상 upright portrait 상태로 유지.
- * MediaPipe EfficientDet-Lite2 모델 사용 (COCO 80 카테고리).
+ * EfficientDet-Lite2 모델은 COCO 80 카테고리를 다룬다.
  */
-class ObjectDetectionManager(private val context: Context) {
+class MediaPipeDetectionProvider(private val context: Context) : DetectionProvider {
 
     companion object {
-        private const val TAG = "ObjectDetection"
+        private const val TAG = "MediaPipeDet"
         private const val MODEL_FILE = "efficientdet_lite2.tflite"  // assets에 번들된 모델
         private const val MAX_RESULTS = 10      // 최대 검출 객체 수
         private const val SCORE_THRESHOLD = 0.3f // 최소 신뢰도 임계값
@@ -37,7 +37,7 @@ class ObjectDetectionManager(private val context: Context) {
     private val bitmapLock = Any()                 // latestBitmap 동기화 락
 
     private var frameSkipCounter = 0               // 프레임 스킵 카운터 (배터리 최적화)
-    @Volatile var paused: Boolean = false           // 추론 중 프레임 처리 중단 플래그
+    @Volatile override var paused: Boolean = false  // 추론 중 프레임 처리 중단 플래그
 
     init {
         setupDetector()
@@ -70,7 +70,7 @@ class ObjectDetectionManager(private val context: Context) {
      * 센서 회전을 적용하여 upright portrait로 변환 후 저장.
      * 검출은 수행하지 않는다 — detectNow()에서만 실행.
      */
-    fun updateFrame(imageProxy: ImageProxy) {
+    override fun updateFrame(imageProxy: ImageProxy) {
         // 추론 중이면 프레임 처리 완전 중단 (배터리 절약)
         if (paused) {
             imageProxy.close()
@@ -110,26 +110,10 @@ class ObjectDetectionManager(private val context: Context) {
     }
 
     /**
-     * 검출 결과 데이터 클래스.
-     * @param objects 검출된 객체 목록
-     * @param bitmap 검출에 사용된 프레임 (크롭용으로 보관)
-     * @param imageWidth 이미지 너비
-     * @param imageHeight 이미지 높이
-     */
-    data class DetectionResult(
-        val objects: List<DetectedObject>,
-        val bitmap: Bitmap,
-        val imageWidth: Int,
-        val imageHeight: Int
-    )
-
-    /**
      * 현재 버퍼된 프레임에서 즉시 검출을 실행한다.
      * 사용자 터치 시 호출. 바운딩박스는 upright 비트맵의 좌표계.
-     *
-     * @return 검출 결과, 또는 프레임/검출기가 없으면 null
      */
-    fun detectNow(): DetectionResult? {
+    override fun detectNow(): DetectionResult? {
         val det = detector ?: return null
 
         // 동기화 블록 내에서 복사본 생성 (원본 recycle 방지)
@@ -164,6 +148,14 @@ class ObjectDetectionManager(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "검출 실패", e)
             null
+        }
+    }
+
+    /** 최신 프레임 사본만 반환 — 검출 미수행. */
+    override fun captureFrame(): Bitmap? {
+        return synchronized(bitmapLock) {
+            val bitmap = latestBitmap ?: return null
+            bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
         }
     }
 
@@ -202,7 +194,7 @@ class ObjectDetectionManager(private val context: Context) {
     }
 
     /** 리소스 해제. DisposableEffect에서 호출 */
-    fun close() {
+    override fun close() {
         detector?.close()
         detector = null
         synchronized(bitmapLock) {

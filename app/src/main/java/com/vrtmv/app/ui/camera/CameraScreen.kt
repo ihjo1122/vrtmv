@@ -16,7 +16,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -52,16 +51,15 @@ import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.vrtmv.app.data.detection.ObjectDetectionManager
 import com.vrtmv.app.data.inference.VlmMode
 import com.vrtmv.app.ui.overlay.DetectionOverlay
 import com.vrtmv.app.ui.overlay.GazeCrosshair
+import com.vrtmv.app.ui.overlay.PointingProgressRing
 import com.vrtmv.app.ui.components.ResultCard
 import com.vrtmv.app.ui.theme.ArCyan
 import com.vrtmv.app.ui.theme.ArTeal
 import com.vrtmv.app.ui.theme.OverlayTagBg
 import com.vrtmv.app.ui.theme.StatusError
-import com.vrtmv.app.ui.theme.SurfaceDark
 import com.vrtmv.app.ui.theme.SurfaceElevated
 import com.vrtmv.app.ui.theme.TextPrimary
 import com.vrtmv.app.ui.theme.TextSecondary
@@ -119,17 +117,22 @@ private fun CameraContent(viewModel: CameraViewModel) {
 
     var viewSize by remember { mutableStateOf(androidx.compose.ui.geometry.Size.Zero) }
 
-    val detectionManager = remember { ObjectDetectionManager(context) }
+    // 검출기 인스턴스는 ViewModel 소유 (onCleared에서 해제)
+    val detectionProvider = viewModel.detectionProvider
     val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
 
-    // 추론 중 프레임 처리 중단을 위해 ViewModel에 참조 전달
-    LaunchedEffect(detectionManager) {
-        viewModel.bindDetectionManager(detectionManager)
+    // 손 제스처 검출 — 터치와 병행. AssetPathResolver 주입은 ViewModel 팩토리가 담당.
+    val gestureDetector = remember {
+        viewModel.createGestureDetector(
+            onUpdate = { x, y, progress -> viewModel.onPointingUpdate(x, y, progress) },
+            onConfirmed = { x, y -> viewModel.onPointingConfirmed(x, y, viewSize.width, viewSize.height) },
+            onLost = { viewModel.onPointingLost() }
+        )
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            detectionManager.close()
+            gestureDetector.close()
             analyzerExecutor.shutdown()
         }
     }
@@ -145,7 +148,6 @@ private fun CameraContent(viewModel: CameraViewModel) {
                     onTap = { offset ->
                         viewModel.onTapDetect(
                             tapPoint = offset,
-                            detectionManager = detectionManager,
                             viewWidth = viewSize.width,
                             viewHeight = viewSize.height
                         )
@@ -181,7 +183,10 @@ private fun CameraContent(viewModel: CameraViewModel) {
                         .build()
                         .also { analysis ->
                             analysis.setAnalyzer(analyzerExecutor) { imageProxy ->
-                                detectionManager.updateFrame(imageProxy)
+                                // 두 소비자 병행 — gestureDetector는 ImageProxy를 닫지 않으므로
+                                // 먼저 호출하고 마지막에 detectionProvider가 close() 담당
+                                gestureDetector.process(imageProxy)
+                                detectionProvider.updateFrame(imageProxy)
                             }
                         }
 
@@ -225,6 +230,21 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 position = point,
                 modifier = Modifier.fillMaxSize()
             )
+        }
+
+        // Layer 3b: 포인팅 홀드 진행률 링 (손 제스처 캡처 중)
+        uiState.pointingPosition?.let { normPos ->
+            if (viewSize.width > 0 && viewSize.height > 0) {
+                val screenPos = androidx.compose.ui.geometry.Offset(
+                    normPos.x * viewSize.width,
+                    normPos.y * viewSize.height
+                )
+                PointingProgressRing(
+                    position = screenPos,
+                    progress = uiState.pointingProgress,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         }
 
         // Layer 4: Bottom hint / result card
@@ -321,32 +341,30 @@ private fun CameraContent(viewModel: CameraViewModel) {
             }
         }
 
-        // Layer 7: Model loading spinner
+        // Layer 7: 모델 로딩 칩 (논블로킹) — 카메라 프리뷰는 즉시 보여주고 상단에 작은 인디케이터만 표시
         if (modelLoading) {
-            Box(
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(SurfaceDark.copy(alpha = 0.85f)),
-                contentAlignment = Alignment.Center
+                    .align(Alignment.TopCenter)
+                    .padding(top = 52.dp)
+                    .background(
+                        SurfaceElevated.copy(alpha = 0.85f),
+                        RoundedCornerShape(16.dp)
+                    )
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(
-                        color = ArCyan,
-                        modifier = Modifier.size(48.dp)
-                    )
-                    Text(
-                        text = "모델 초기화 중...",
-                        color = TextPrimary,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(top = 16.dp)
-                    )
-                    Text(
-                        text = uiState.modelDisplayName,
-                        color = ArCyan,
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
-                }
+                CircularProgressIndicator(
+                    color = ArCyan,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(14.dp)
+                )
+                Text(
+                    text = "모델 초기화 중",
+                    color = TextPrimary.copy(alpha = 0.9f),
+                    style = MaterialTheme.typography.labelMedium
+                )
             }
         }
     }

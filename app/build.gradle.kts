@@ -46,6 +46,9 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+        // litertlm 0.10.0이 Kotlin 2.3.0으로 컴파일되어 있어 메타데이터 버전 검증을 스킵.
+        // KSP가 Kotlin 2.3.x를 아직 지원하지 않아 정식 bump 불가 (KSP 최신 2.2.21-2.0.5).
+        freeCompilerArgs += listOf("-Xskip-metadata-version-check")
     }
 
     buildFeatures {
@@ -89,6 +92,10 @@ dependencies {
     // MediaPipe
     implementation(libs.mediapipe.vision)
 
-    // LiteRT-LM (on-device, Gemma 3n etc.)
-    implementation("com.google.ai.edge.litertlm:litertlm-android:0.8.0")
+    // LiteRT-LM (on-device, Gemma 4 등)
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.10.0")
+
+    // TFLite (YOLOv11n 검출기용) — YOLOv11n GPU delegate 이슈로 GPU 변종은 제외, CPU 4스레드 고정
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 }

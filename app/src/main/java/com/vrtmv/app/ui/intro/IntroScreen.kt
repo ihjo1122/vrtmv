@@ -1,9 +1,5 @@
 package com.vrtmv.app.ui.intro
 
-import android.content.Intent
-import android.net.Uri
-import android.os.Environment
-import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.tween
@@ -67,30 +63,7 @@ fun IntroScreen(
     onNavigateToMain: () -> Unit,
     viewModel: IntroViewModel = hiltViewModel()
 ) {
-    val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    var storageGranted by remember { mutableStateOf(Environment.isExternalStorageManager()) }
-
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        val granted = Environment.isExternalStorageManager()
-        if (granted && !storageGranted) {
-            storageGranted = true
-            viewModel.retry()
-        }
-        storageGranted = granted
-    }
-
-    if (!storageGranted) {
-        StoragePermissionScreen(
-            onRequestPermission = {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
-                    data = Uri.parse("package:${context.packageName}")
-                }
-                context.startActivity(intent)
-            }
-        )
-        return
-    }
 
     LaunchedEffect(uiState) {
         if (uiState is IntroUiState.Ready) {
@@ -138,6 +111,18 @@ fun IntroScreen(
                     )
                 }
 
+                is IntroUiState.Initializing -> {
+                    Text(
+                        text = state.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = ArCyan
+                    )
+                    GradientProgressBar(
+                        progress = null,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
                 is IntroUiState.ModelReady -> {
                     AnimatedVisibility(
                         visible = true,
@@ -159,7 +144,12 @@ fun IntroScreen(
                 is IntroUiState.Downloading -> {
                     val percent = (state.progress * 100).toInt()
                     Text(
-                        text = "모델 다운로드 중... $percent%",
+                        text = "[${state.currentIndex}/${state.totalItems}] ${state.currentItemName}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = ArCyan
+                    )
+                    Text(
+                        text = "다운로드 중... $percent%",
                         style = MaterialTheme.typography.bodySmall,
                         color = TextPrimary
                     )
@@ -211,11 +201,12 @@ fun IntroScreen(
                     ) {
                         Text("다시 시도")
                     }
+                    // 비치명적 오류(보조 자산)는 "계속" 으로 스킵 가능
                     TextButton(
                         onClick = { viewModel.skip() }
                     ) {
                         Text(
-                            text = "건너뛰기",
+                            text = if (state.isCritical) "건너뛰기" else "계속",
                             color = TextSecondary,
                             style = MaterialTheme.typography.bodySmall
                         )
@@ -223,55 +214,6 @@ fun IntroScreen(
                 }
 
                 is IntroUiState.Ready -> { }
-            }
-        }
-    }
-}
-
-@Composable
-private fun StoragePermissionScreen(onRequestPermission: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(SurfaceDark)
-    ) {
-        HudBackground()
-
-        Column(
-            modifier = Modifier.align(Alignment.Center),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            AppHeader(titleSize = 48.sp)
-
-            Spacer(modifier = Modifier.height(48.dp))
-
-            Icon(
-                imageVector = Icons.Outlined.FolderOpen,
-                contentDescription = null,
-                tint = ArCyan.copy(alpha = 0.6f),
-                modifier = Modifier.size(48.dp)
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = "모델 파일 접근을 위해\n파일 관리 권한이 필요합니다",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
-                textAlign = TextAlign.Center
-            )
-            Spacer(modifier = Modifier.height(20.dp))
-            OutlinedButton(
-                onClick = onRequestPermission,
-                shape = RoundedCornerShape(8.dp),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = ArCyan
-                ),
-                border = ButtonDefaults.outlinedButtonBorder(true).copy(
-                    brush = Brush.linearGradient(
-                        listOf(ArCyan.copy(alpha = 0.5f), ArCyan.copy(alpha = 0.2f))
-                    )
-                )
-            ) {
-                Text("권한 설정")
             }
         }
     }

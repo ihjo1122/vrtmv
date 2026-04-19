@@ -7,8 +7,8 @@
 
 ### 2단계: MediaPipe Object Detector ✅ 완료
 - **EfficientDet-Lite2** 모델 번들링 (assets/, 7.2MB)
-- ObjectDetectionManager — **온디맨드 방식** (프레임 버퍼링 + 회전 적용 + 터치 시 검출)
-- CoordinateMapper — 스케일+오프셋만 담당 (회전은 Bitmap에서 처리)
+- DetectionProvider (MediaPipe/YOLO 구현체) — **온디맨드 방식** (프레임 버퍼링 + 회전 적용 + 터치 시 검출)
+- CoordinateMapper — 스케일+오프셋만 담당 (회전은 각 `DetectionProvider.updateFrame` 내부에서 `postRotate`로 적용)
 
 ### 3단계: 터치 기반 ROI 선택 ✅ 완료
 - GazeTargetResolver (포함 검사 → 최소 면적 → 최근접 중심)
@@ -47,3 +47,25 @@
 - **DownloadProgressUI**: IntroScreen/MainScreen 공통 다운로드 진행률 컴포넌트
 - **Navigation**: camera/{modelId} 라우트 + SavedStateHandle로 ViewModel에 전달
 - **LiteRT-LM 단일 엔진**: Gemma 3n E2B-IT 멀티모달 엔진 (이미지 직접 입력, GPU 비전 백엔드)
+
+### 8단계: Intro 자동 다운로드 통합 ✅ 완료 (2026-04-11)
+- **AssetInfo/AssetRegistry**: YOLO, 제스처 자산 메타데이터 중앙 관리
+- **AssetPathResolver**: `getExternalFilesDir(null)/vrtmv-assets/` 탐색, 부분 다운로드 배제(1KB 최소)
+- **ModelDownloadManager.startAssetDownload**: `setDestinationInExternalFilesDir` 사용, HF_TOKEN 헤더 재사용
+- **IntroViewModel 다운로드 큐**: VLM → YOLO → 제스처 순차 처리, `[n/3]` 진행 표시
+- **graceful degradation**: 보조 자산 실패 시 "계속" 버튼으로 스킵, VLM 실패만 치명적
+- **HandGestureDetector / YoloDetectionProvider**: 상대 경로(assets) → 절대 경로(내부 저장소)로 로드 방식 변경
+- **YOLO 파일명 정정**: `yolov11n_float16.tflite` → `yolo11n_float16.tflite` (HF 업로드 실제 파일명 일치)
+- **YOLO GPU Delegate 제거**: Ultralytics YOLOv11n Android TFLite GPU delegate 이슈 대응, CPU 4스레드 고정
+- **사용자 편의성**: APK 설치 후 **수동 자산 배치 불필요** — 최초 실행 시 전 자산 자동 준비
+
+### 7단계: LiteRT-LM 0.10.0 전환 + 검출기 듀얼 + 손 제스처 ✅ 완료 (2026-04-11)
+- **VLM**: Gemma 3n E2B-IT (INT4) 유지. Gemma 4 시도했으나 litertlm 0.10.0 포맷 미지원 + AICore 부재로 보류 (0.10.1 대기, ModelRegistry에 주석 보존)
+- **LiteRT-LM 0.10.0**: API 재설계 대응 (`SamplerConfig`, `ConversationConfig`, `Backend.CPU()`/`GPU()` 인스턴스화, `Contents` 래퍼)
+- **Kotlin 메타데이터 우회**: `-Xskip-metadata-version-check` (KSP가 Kotlin 2.3.x 미지원이므로 정식 bump 보류)
+- **추론 속도 최적화**: greedy 디코딩(topK=1, temp=0), `maxNumTokens=512`, 비전 입력 256px, JPEG 75, 40자 이내 구체적 프롬프트
+- **HF 자동 다운로드**: `huggingface.co/joinhyeok/gemma` 공개 미러 리포에서 `DownloadManager`가 자동 수신. `HF_TOKEN` 헤더 자동 전달 (gated 대응)
+- **검출기 듀얼 버전**: `DetectionProvider` 인터페이스 → `MediaPipeDetectionProvider` + `YoloDetectionProvider` (TFLite 2.16.1 + GPU Delegate, letterbox, NMS, COCO80)
+- **메인 화면 재구성**: 모델 카드 대신 **검출기 버튼 2종** (MediaPipe / YOLO), 네비게이션 `camera/{modelId}/{detectorId}`
+- **손 포인팅 제스처**: `HandGestureDetector` (MediaPipe GestureRecognizer LIVE_STREAM), 검지 0.5초 홀드 → 터치 경로 자동 발화, `PointingProgressRing` 피드백
+- **자산 별도 준비**: `yolov11n_float16.tflite` (Ultralytics export), `gesture_recognizer.task` (MediaPipe) — 누락 시 해당 기능만 graceful degradation

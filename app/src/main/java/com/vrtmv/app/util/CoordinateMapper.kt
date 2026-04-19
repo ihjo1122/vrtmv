@@ -1,30 +1,23 @@
 package com.vrtmv.app.util
 
 import android.graphics.RectF
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 
 /**
- * 이미지 좌표 ↔ 화면 좌표 변환기.
+ * 이미지 좌표 → 화면 좌표 변환기.
  *
- * ObjectDetectionManager에서 이미 회전이 적용된 upright 비트맵을 사용하므로
- * 회전 처리는 불필요하며, 스케일과 오프셋만 계산한다.
- * PreviewView의 FILL_CENTER 스케일 모드에 맞춰 매핑.
- *
- * @param imageWidth 분석 이미지의 너비 (회전 적용 후)
- * @param imageHeight 분석 이미지의 높이 (회전 적용 후)
- * @param viewWidth 화면 뷰의 너비
- * @param viewHeight 화면 뷰의 높이
+ * 각 `DetectionProvider.updateFrame`이 회전을 적용한 upright 비트맵을 넘기므로
+ * 회전 계산은 생략하고 스케일·오프셋만 처리한다. PreviewView의 FILL_CENTER 모드에 맞춘다.
  */
 class CoordinateMapper(
-    private val imageWidth: Int,
-    private val imageHeight: Int,
+    imageWidth: Int,
+    imageHeight: Int,
     private val viewWidth: Float,
     private val viewHeight: Float
 ) {
-    private val scale: Float    // 이미지→화면 스케일 배율
-    private val offsetX: Float  // 수평 오프셋 (FILL_CENTER 크롭 보정)
-    private val offsetY: Float  // 수직 오프셋
+    private val scale: Float
+    private val offsetX: Float
+    private val offsetY: Float
 
     init {
         val scaleX = viewWidth / imageWidth.toFloat()
@@ -32,15 +25,12 @@ class CoordinateMapper(
         // FILL_CENTER: 화면을 가득 채우도록 큰 쪽 스케일 사용 (넘치는 부분은 크롭)
         scale = maxOf(scaleX, scaleY)
 
-        // 중앙 정렬을 위한 오프셋 계산
+        // FILL_CENTER에서는 오프셋이 음수가 될 수 있다 — 넘치는 영역을 화면 밖으로 밀어내는 정상 동작
         offsetX = (viewWidth - imageWidth * scale) / 2f
         offsetY = (viewHeight - imageHeight * scale) / 2f
     }
 
-    /**
-     * 이미지 픽셀 좌표의 바운딩박스를 화면 좌표로 변환한다.
-     * 검출 결과를 오버레이에 그릴 때 사용.
-     */
+    /** 이미지 픽셀 바운딩박스 → 화면 좌표. 검출 결과를 오버레이에 그릴 때 사용. */
     fun mapToView(box: RectF): Rect {
         return Rect(
             left = (box.left * scale + offsetX).coerceIn(0f, viewWidth),
@@ -50,18 +40,7 @@ class CoordinateMapper(
         )
     }
 
-    /**
-     * 화면 좌표(터치 포인트)를 이미지 픽셀 좌표로 변환한다.
-     * 터치 위치에서 어떤 객체가 있는지 판별할 때 사용.
-     */
-    fun mapToImage(viewOffset: Offset): Offset {
-        return Offset(
-            x = (viewOffset.x - offsetX) / scale,
-            y = (viewOffset.y - offsetY) / scale
-        )
-    }
-
-    // 디버그용 접근자
+    // 디버그 로그 전용 — 운영 경로에서는 호출되지 않음
     fun debugScale(): Float = scale
     fun debugOffsetX(): Float = offsetX
     fun debugOffsetY(): Float = offsetY
