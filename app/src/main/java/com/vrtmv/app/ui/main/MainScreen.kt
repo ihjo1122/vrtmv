@@ -23,12 +23,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Hub
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material.icons.outlined.TouchApp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -58,17 +62,19 @@ import com.vrtmv.app.ui.theme.TextSecondary
 
 @Composable
 fun MainScreen(
-    onNavigateToCamera: (modelId: String, detectorId: String) -> Unit,
+    onNavigateToCamera: (modelId: String, detectorId: String, useArCore: Boolean, fullFrameVlm: Boolean) -> Unit,
     viewModel: MainViewModel = hiltViewModel()
 ) {
     val downloadState by viewModel.downloadState.collectAsState()
+    val useArCore by viewModel.useArCore.collectAsState()
+    val fullFrameVlm by viewModel.fullFrameVlm.collectAsState()
     val modelInfo = remember { viewModel.getDefaultModel() }
 
     LaunchedEffect(downloadState) {
         if (downloadState is MainDownloadState.Ready) {
             val ready = downloadState as MainDownloadState.Ready
             viewModel.resetState()
-            onNavigateToCamera(ready.modelId, ready.detectorKind.id)
+            onNavigateToCamera(ready.modelId, ready.detectorKind.id, ready.useArCore, ready.fullFrameVlm)
         }
     }
 
@@ -116,6 +122,20 @@ fun MainScreen(
                 subtitle = "COCO 80 · 고정밀 · 작은 객체 강점",
                 icon = Icons.Filled.Bolt,
                 onClick = { viewModel.onDetectorSelected(DetectorKind.YOLO) },
+                enabled = downloadState is MainDownloadState.Idle
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            ArCoreToggleRow(
+                checked = useArCore,
+                onToggle = { viewModel.toggleArCore() },
+                enabled = downloadState is MainDownloadState.Idle
+            )
+
+            FullFrameVlmToggleRow(
+                checked = fullFrameVlm,
+                onToggle = { viewModel.toggleFullFrameVlm() },
                 enabled = downloadState is MainDownloadState.Idle
             )
         }
@@ -176,6 +196,112 @@ fun MainScreen(
             )
         }
         else -> { }
+    }
+}
+
+@Composable
+private fun FullFrameVlmToggleRow(
+    checked: Boolean,
+    onToggle: () -> Unit,
+    enabled: Boolean
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth(0.85f)
+            .background(SurfaceElevated.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+            .border(
+                1.dp,
+                ArCyan.copy(alpha = if (checked) 0.45f else 0.15f),
+                RoundedCornerShape(10.dp)
+            )
+            .clickable(enabled = enabled, onClick = onToggle)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Image,
+            contentDescription = null,
+            tint = if (checked) ArCyan else TextSecondary,
+            modifier = Modifier.size(18.dp)
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "VLM 전체 이미지 분석",
+                style = MaterialTheme.typography.labelMedium,
+                color = TextPrimary
+            )
+            Text(
+                text = if (checked) "ON — 상황·맥락 포함 (권장)"
+                       else "OFF — 선택 객체만 크롭하여 분석",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = { onToggle() },
+            enabled = enabled,
+            colors = SwitchDefaults.colors(
+                checkedTrackColor = ArCyan.copy(alpha = 0.6f),
+                checkedThumbColor = ArCyan,
+                uncheckedTrackColor = SurfaceElevated,
+                uncheckedThumbColor = TextSecondary
+            )
+        )
+    }
+}
+
+@Composable
+private fun ArCoreToggleRow(
+    checked: Boolean,
+    onToggle: () -> Unit,
+    enabled: Boolean
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth(0.85f)
+            .background(SurfaceElevated.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+            .border(
+                1.dp,
+                ArCyan.copy(alpha = if (checked) 0.45f else 0.15f),
+                RoundedCornerShape(10.dp)
+            )
+            .clickable(enabled = enabled, onClick = onToggle)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Filled.ViewInAr,
+            contentDescription = null,
+            tint = if (checked) ArCyan else TextSecondary,
+            modifier = Modifier.size(18.dp)
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "ARCore 오버레이 사용",
+                style = MaterialTheme.typography.labelMedium,
+                color = TextPrimary
+            )
+            Text(
+                text = if (checked) "월드 앵커 기반 — 카메라 이동에도 태그 고정"
+                       else "OFF — CameraX 화면 좌표 기반 (안정)",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = { onToggle() },
+            enabled = enabled,
+            colors = SwitchDefaults.colors(
+                checkedTrackColor = ArCyan.copy(alpha = 0.6f),
+                checkedThumbColor = ArCyan,
+                uncheckedTrackColor = SurfaceElevated,
+                uncheckedThumbColor = TextSecondary
+            )
+        )
     }
 }
 

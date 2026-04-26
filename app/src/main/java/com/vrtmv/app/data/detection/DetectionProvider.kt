@@ -1,7 +1,6 @@
 package com.vrtmv.app.data.detection
 
 import android.graphics.Bitmap
-import androidx.camera.core.ImageProxy
 import com.vrtmv.app.domain.model.DetectedObject
 
 /**
@@ -11,11 +10,21 @@ import com.vrtmv.app.domain.model.DetectedObject
  * - 런타임에는 한 번에 한 구현체만 생성·로드됨 (혼합 실행 아님)
  * - 프레임 버퍼링은 각 구현체 내부에서 관리
  * - detectNow()는 터치·제스처 시점에 온디맨드 호출
+ *
+ * 입력 비트맵은 [com.vrtmv.app.data.camera.FrameSource] 가 이미 upright(센서 회전 적용)
+ * 상태로 송출하므로 구현체는 회전 처리를 하지 않는다.
  */
 interface DetectionProvider {
 
-    /** 최신 카메라 프레임을 버퍼에 저장. Analyzer 스레드에서 호출됨. */
-    fun updateFrame(imageProxy: ImageProxy)
+    /**
+     * 최신 카메라 프레임을 버퍼에 저장.
+     *
+     * **수명 계약**: [bitmap]은 호출 동안만 유효. 보존하려면 사본을 만들 것.
+     *
+     * @param bitmap upright ARGB_8888 비트맵 — 호출 직후 [FrameSource]가 recycle
+     * @param timestampMs 단조 ms 타임스탬프 (현재 미사용, 추후 디버그/통계용)
+     */
+    fun updateFrame(bitmap: Bitmap, timestampMs: Long)
 
     /** 현재 버퍼된 프레임에서 즉시 검출 실행. 프레임 없으면 null. */
     fun detectNow(): DetectionResult?

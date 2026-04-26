@@ -16,13 +16,19 @@ Android 앱에서 카메라 프리뷰 중 **사용자가 터치한 좌표의 객
   - **OFF 모드에서도 탭/제스처 시 검출을 수행**해 객체 박스·라벨을 오버레이로 표시 (VLM 미실행)
 - **초기화는 Intro 단계에서 일괄 수행** — 다운로드 완료 후 `inferenceEngine.loadModel()` + 1x1 워밍업 + `DetectionProviderRegistry.initAll()`(MediaPipe + YOLO 동시) 실행. Main/Camera 진입 시 추가 로딩 없음.
 - **검출기 듀얼 버전** — 메인 화면에서 MediaPipe / YOLO 중 선택. 두 구현 모두 Intro에서 선행 초기화되어 `DetectionProviderRegistry` Singleton에 상주, Camera 전환 시 즉시 재사용
+- **카메라 백엔드 듀얼** — 메인 화면 토글로 ARCore / CameraX 선택. 검출기·VLM 등 하류 파이프라인은 동일 코드 재사용 — `FrameSource` 추상화가 백엔드 차이를 흡수
+  - **CameraX (기본/폴백)**: `PreviewView` + `ImageAnalysis` → upright Bitmap 송출
+  - **ARCore (옵션, 학술 과제)**: `Session` + `GLSurfaceView`(`BackgroundRenderer`) + YUV→Bitmap 변환. 탭/제스처 시 `Frame.hitTest()` → `Anchor` 생성, 매 프레임 `AnchorProjector` 로 화면 좌표 재투영하여 결과 태그가 실세계에 고정된 듯이 추종. tracking 미초기화/hitTest 실패 시 카메라 전방 1.5m fallback anchor. ARCore 미지원/Session 실패 시 자동으로 CameraX 폴백.
 - **추론 중 입력 차단** — Loading 상태에서 추가 터치·제스처 무시, 롱프레스로 중지 후 재질의 가능
 
 ## 기술 스택
 - **언어**: Kotlin 2.1.0 (+ `-Xskip-metadata-version-check` — litertlm 0.10.0이 Kotlin 2.3 메타데이터 사용)
 - **UI**: Jetpack Compose + Material3
 - **아키텍처**: MVVM + Hilt DI (단일 모듈)
-- **카메라**: CameraX 1.4.1 (Preview + ImageAnalysis 프레임 버퍼링, 두 소비자 병행)
+- **카메라**:
+  - CameraX 1.4.1 (Preview + ImageAnalysis 프레임 버퍼링) — 폴백 백엔드
+  - ARCore 1.48.0 (Session + GLSurfaceView, optional 메타데이터로 미지원 기기 호환) — 월드 앵커 백엔드
+  - `FrameSource` 인터페이스로 두 백엔드를 추상화, 검출기/제스처 모듈은 항상 upright Bitmap 만 수신 (ImageProxy/ARCore Image 양쪽 노출 안 함)
 - **객체 검출**:
   - MediaPipe Vision 0.10.20 (EfficientDet-Lite2, COCO 80) — 기본 옵션
   - YOLOv11n TFLite (tensorflow-lite 2.16.1, CPU 4스레드) — 고정밀 옵션 (GPU Delegate는 Ultralytics 이슈로 제거)
@@ -46,8 +52,13 @@ Android 앱에서 카메라 프리뷰 중 **사용자가 터치한 좌표의 객
 com.vrtmv.app/
 ├── di/InferenceModule.kt                  # Hilt DI (LiteRtLmEngine 단일 엔진)
 ├── data/
+│   ├── camera/
+│   │   ├── FrameSource.kt                 # 백엔드 공통 인터페이스 + FrameListener + ArFrameCallback
+│   │   ├── CameraXFrameSource.kt          # CameraX 백엔드 (PreviewView + ImageAnalysis)
+│   │   ├── ArCoreFrameSource.kt           # ARCore 백엔드 (Session + GLSurfaceView)
+│   │   └── BackgroundRenderer.kt          # ARCore 카메라 텍스처 → 풀스크린 GL 쿼드 렌더
 │   ├── detection/
-│   │   ├── DetectionProvider.kt           # 검출기 공통 인터페이스 + DetectionResult
+│   │   ├── DetectionProvider.kt           # 검출기 공통 인터페이스 + DetectionResult (입력은 Bitmap)
 │   │   ├── DetectionProviderRegistry.kt   # Singleton 캐시 (MediaPipe + YOLO 상주, Intro에서 선행 초기화)
 │   │   ├── MediaPipeDetectionProvider.kt  # MediaPipe EfficientDet-Lite2 구현
 │   │   ├── YoloDetectionProvider.kt       # YOLOv11n TFLite 구현 (letterbox + NMS)
@@ -65,20 +76,23 @@ com.vrtmv.app/
 │   ├── InferenceState.kt                  # Idle, Loading, Success, Error
 │   ├── ModelInfo.kt                       # 모델 정보 (id, url, quantization)
 │   └── ModelRegistry.kt                   # 모델 목록 중앙 관리
-├── navigation/AppNavHost.kt               # Intro → Main → Camera/{modelId}/{detectorId}
+├── navigation/AppNavHost.kt               # Intro → Main → Camera/{modelId}/{detectorId}/{useArCore}
 ├── ui/
 │   ├── intro/IntroScreen.kt, IntroViewModel.kt
-│   ├── main/MainScreen.kt, MainViewModel.kt   # 검출기 버튼 2종
-│   ├── camera/CameraScreen.kt, CameraViewModel.kt  # 터치 + 제스처 병행
+│   ├── main/MainScreen.kt, MainViewModel.kt   # 검출기 버튼 2종 + ARCore 사용 토글
+│   ├── camera/CameraScreen.kt, CameraViewModel.kt  # 터치 + 제스처 병행, anchor 추종 로직
 │   ├── overlay/DetectionOverlay.kt, GazeCrosshair.kt (PointingProgressRing 포함)
 │   ├── components/AppHeader.kt, ResultCard.kt, DownloadProgressUI.kt
 │   └── theme/Theme.kt, Color.kt, Type.kt
 ├── util/
+│   ├── AnchorProjector.kt                 # ARCore Anchor pose → 화면 좌표 투영 (MVP 행렬)
 │   ├── AssetPathResolver.kt               # 보조 자산 탐색 (getExternalFilesDir/vrtmv-assets/)
-│   ├── CoordinateMapper.kt                # 이미지↔화면 좌표 변환
+│   ├── CoordinateMapper.kt                # 이미지↔화면 좌표 변환 (CameraX 경로용)
 │   ├── GazeTargetResolver.kt              # 터치→객체 매칭 알고리즘
+│   ├── ImageProxyConverter.kt             # CameraX ImageProxy(RGBA_8888) → upright Bitmap
 │   ├── ModelPathResolver.kt               # VLM 모델 파일 경로 탐색 (내부/Download 통합)
-│   └── RoiCropper.kt                      # 바운딩박스 크롭 (15% 패딩)
+│   ├── RoiCropper.kt                      # 바운딩박스 크롭 (15% 패딩)
+│   └── YuvToBitmapConverter.kt            # ARCore CPU 이미지(YUV_420_888) → upright Bitmap (BT.601, 90° 회전)
 ├── MainActivity.kt
 └── VrtmvApplication.kt
 ```

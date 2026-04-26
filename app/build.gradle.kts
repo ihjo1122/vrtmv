@@ -83,11 +83,14 @@ dependencies {
     ksp(libs.hilt.compiler)
     implementation(libs.hilt.navigation.compose)
 
-    // CameraX
+    // CameraX (ARCore 미지원/실패 기기 폴백 경로용)
     implementation(libs.camerax.core)
     implementation(libs.camerax.camera2)
     implementation(libs.camerax.lifecycle)
     implementation(libs.camerax.view)
+
+    // ARCore (월드 앵커 기반 AR 오버레이)
+    implementation(libs.arcore)
 
     // MediaPipe
     implementation(libs.mediapipe.vision)

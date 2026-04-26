@@ -22,7 +22,12 @@ sealed class MainDownloadState {
     data object Idle : MainDownloadState()
     data class Downloading(val modelInfo: ModelInfo, val progress: DownloadProgress?) : MainDownloadState()
     data class Error(val message: String) : MainDownloadState()
-    data class Ready(val modelId: String, val detectorKind: DetectorKind) : MainDownloadState()
+    data class Ready(
+        val modelId: String,
+        val detectorKind: DetectorKind,
+        val useArCore: Boolean,
+        val fullFrameVlm: Boolean
+    ) : MainDownloadState()
 }
 
 @HiltViewModel
@@ -37,6 +42,26 @@ class MainViewModel @Inject constructor(
     private val _downloadState = MutableStateFlow<MainDownloadState>(MainDownloadState.Idle)
     val downloadState: StateFlow<MainDownloadState> = _downloadState.asStateFlow()
 
+    /** ARCore 백엔드 사용 여부 토글. 기본 ON — 월드 앵커 기반 AR 오버레이 활성. 미지원 기기는 런타임에 CameraX 자동 폴백. */
+    private val _useArCore = MutableStateFlow(true)
+    val useArCore: StateFlow<Boolean> = _useArCore.asStateFlow()
+
+    fun toggleArCore() {
+        _useArCore.value = !_useArCore.value
+    }
+
+    /**
+     * VLM 추론 시 전체 프레임 vs 객체 크롭 사용 토글. 기본 ON (전체 프레임).
+     * 전체 프레임이 VLM 에 더 풍부한 맥락을 주어 "상황 설명" 품질이 안정적.
+     * 객체 크롭이 필요한 경우(예: 세밀한 객체 분석) OFF 로 전환.
+     */
+    private val _fullFrameVlm = MutableStateFlow(true)
+    val fullFrameVlm: StateFlow<Boolean> = _fullFrameVlm.asStateFlow()
+
+    fun toggleFullFrameVlm() {
+        _fullFrameVlm.value = !_fullFrameVlm.value
+    }
+
     /** 기본(단일) 모델 반환 */
     fun getDefaultModel(): ModelInfo = ModelRegistry.getDefaultModel()
 
@@ -46,18 +71,20 @@ class MainViewModel @Inject constructor(
      */
     fun onDetectorSelected(detectorKind: DetectorKind) {
         val modelInfo = ModelRegistry.getDefaultModel()
+        val ar = _useArCore.value
+        val full = _fullFrameVlm.value
         viewModelScope.launch {
             val exists = downloadManager.modelExists(modelInfo)
             if (exists) {
-                Log.d(TAG, "모델 이미 존재: ${modelInfo.displayName} + ${detectorKind.displayName}")
-                _downloadState.value = MainDownloadState.Ready(modelInfo.id, detectorKind)
+                Log.d(TAG, "모델 이미 존재: ${modelInfo.displayName} + ${detectorKind.displayName} arcore=$ar fullFrame=$full")
+                _downloadState.value = MainDownloadState.Ready(modelInfo.id, detectorKind, ar, full)
             } else {
-                startModelDownload(modelInfo, detectorKind)
+                startModelDownload(modelInfo, detectorKind, ar, full)
             }
         }
     }
 
-    private fun startModelDownload(modelInfo: ModelInfo, detectorKind: DetectorKind) {
+    private fun startModelDownload(modelInfo: ModelInfo, detectorKind: DetectorKind, useArCore: Boolean, fullFrame: Boolean) {
         viewModelScope.launch {
             try {
                 val downloadId = downloadManager.startDownload(modelInfo)
@@ -67,7 +94,7 @@ class MainViewModel @Inject constructor(
                     when {
                         progress.isComplete -> {
                             Log.d(TAG, "다운로드 완료: ${modelInfo.displayName}")
-                            _downloadState.value = MainDownloadState.Ready(modelInfo.id, detectorKind)
+                            _downloadState.value = MainDownloadState.Ready(modelInfo.id, detectorKind, useArCore, fullFrame)
                         }
                         progress.isFailed -> {
                             _downloadState.value = MainDownloadState.Error(

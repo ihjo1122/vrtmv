@@ -2,9 +2,7 @@ package com.vrtmv.app.data.detection
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Matrix
 import android.util.Log
-import androidx.camera.core.ImageProxy
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.google.mediapipe.tasks.core.BaseOptions
@@ -14,7 +12,6 @@ import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizer
 import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizerResult
 import com.vrtmv.app.domain.model.AssetRegistry
 import com.vrtmv.app.util.AssetPathResolver
-import java.nio.ByteBuffer
 import kotlin.math.hypot
 import kotlin.math.max
 
@@ -29,12 +26,21 @@ import kotlin.math.max
  * 4) 프레임에서 포인팅이 감지되지 않으면 즉시 [onPointingLost] 콜백으로 UI 포인트를 숨김
  *
  * 앵커는 롤링 평균으로 따라가므로 손이 천천히 움직여도 홀드가 유지된다.
+ *
+ * 입력 비트맵은 [com.vrtmv.app.data.camera.FrameSource] 가 이미 upright 상태로 송출하므로
+ * 이 클래스는 회전 처리를 하지 않는다.
  */
 class HandGestureDetector(
     private val context: Context,
     private val assetPathResolver: AssetPathResolver,
     private val onPointingUpdate: (normX: Float, normY: Float, progress: Float) -> Unit,
-    private val onPointingConfirmed: (normX: Float, normY: Float) -> Unit,
+    /**
+     * 포인팅 홀드 완료 콜백.
+     * @param dirX 검지 MCP(5) → TIP(8) 정규화 방향 x (0 이면 방향 불명)
+     * @param dirY 정규화 방향 y (위쪽이 음수)
+     * 하류에서 "손이 아닌 뒷 배경"을 크롭할 때 이 방향으로 오프셋하여 손을 프레임 밖으로 밀어낸다.
+     */
+    private val onPointingConfirmed: (normX: Float, normY: Float, dirX: Float, dirY: Float) -> Unit,
     private val onPointingLost: () -> Unit
 ) {
     companion object {
@@ -66,7 +72,7 @@ class HandGestureDetector(
     private var holdStartMs: Long = 0L
     private var anchorX = 0f
     private var anchorY = 0f
-    private var frameCounter: Long = 0  // 단조증가 타임스탬프 (LIVE_STREAM 요구사항)
+    private var lastTimestampMs: Long = 0L  // MediaPipe LIVE_STREAM 단조 증가 보장
     private var frameSkipCounter = 0
 
     // UI 포인트 가시성 상태 — 중복 onPointingLost 호출을 방지하기 위한 로컬 플래그
@@ -106,30 +112,23 @@ class HandGestureDetector(
         }
     }
 
-    /** Analyzer 스레드에서 호출. ImageProxy는 호출자가 닫아야 함. */
-    fun process(imageProxy: ImageProxy) {
+    /**
+     * FrameSource 콜백에서 호출. [bitmap]은 upright 상태이며 호출 동안만 유효(소스가 직후 recycle).
+     * recognizeAsync 는 비동기로 처리되므로 MPImage 가 비트맵을 비동기 참조할 가능성에 대비하여 사본 전달.
+     */
+    fun process(bitmap: Bitmap, timestampMs: Long) {
         if (paused) return
         val rec = recognizer ?: return
 
         if (frameSkipCounter++ % FRAME_SKIP != 0) return
 
         try {
-            val rawBitmap = imageProxyToBitmap(imageProxy) ?: return
-            val rotation = imageProxy.imageInfo.rotationDegrees
-
-            val upright = if (rotation != 0) {
-                val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-                val rotated = Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
-                if (rotated != rawBitmap) rawBitmap.recycle()
-                rotated
-            } else {
-                rawBitmap
-            }
-
-            // 입력은 CameraX에서 이미 640x480으로 설정되어 있어 heap 부담 낮음 —
-            // 추가 다운스케일 없이 그대로 전달 (MediaPipe 내부가 전처리 담당).
-            val mpImage = BitmapImageBuilder(upright).build()
-            rec.recognizeAsync(mpImage, ++frameCounter)
+            val copy = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
+            val mpImage = BitmapImageBuilder(copy).build()
+            // MediaPipe LIVE_STREAM 은 단조 증가 타임스탬프를 요구. 같은 ms 가 들어오면 +1 보정.
+            val ts = if (timestampMs > lastTimestampMs) timestampMs else lastTimestampMs + 1
+            lastTimestampMs = ts
+            rec.recognizeAsync(mpImage, ts)
         } catch (e: Exception) {
             Log.e(TAG, "제스처 프레임 처리 실패", e)
         }
@@ -187,7 +186,14 @@ class HandGestureDetector(
         pointVisible = true
 
         if (elapsed >= HOLD_DURATION_MS) {
-            onPointingConfirmed(x, y)
+            val mcp = landmarks.getOrNull(5)
+            val dir = if (mcp != null) {
+                val dx = x - mcp.x()
+                val dy = y - mcp.y()
+                val mag = hypot(dx, dy)
+                if (mag > 1e-4f) dx / mag to dy / mag else 0f to 0f
+            } else 0f to 0f
+            onPointingConfirmed(x, y, dir.first, dir.second)
             resetHold()
         }
     }
@@ -238,34 +244,5 @@ class HandGestureDetector(
             Log.w(TAG, "제스처 인식기 해제 오류", e)
         }
         recognizer = null
-    }
-
-    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
-        return try {
-            val planes = imageProxy.planes
-            val buffer: ByteBuffer = planes[0].buffer
-            val pixelStride = planes[0].pixelStride
-            val rowStride = planes[0].rowStride
-            val rowPadding = rowStride - pixelStride * imageProxy.width
-
-            val bitmap = Bitmap.createBitmap(
-                imageProxy.width + rowPadding / pixelStride,
-                imageProxy.height,
-                Bitmap.Config.ARGB_8888
-            )
-            buffer.rewind()
-            bitmap.copyPixelsFromBuffer(buffer)
-
-            if (rowPadding > 0) {
-                val cropped = Bitmap.createBitmap(bitmap, 0, 0, imageProxy.width, imageProxy.height)
-                if (cropped != bitmap) bitmap.recycle()
-                cropped
-            } else {
-                bitmap
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "ImageProxy→Bitmap 변환 실패", e)
-            null
-        }
     }
 }

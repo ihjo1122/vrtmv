@@ -4,10 +4,8 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Matrix
 import android.graphics.RectF
 import android.util.Log
-import androidx.camera.core.ImageProxy
 import com.vrtmv.app.domain.model.AssetRegistry
 import com.vrtmv.app.domain.model.DetectedObject
 import com.vrtmv.app.util.AssetPathResolver
@@ -136,38 +134,21 @@ class YoloDetectionProvider(
         }
     }
 
-    override fun updateFrame(imageProxy: ImageProxy) {
-        if (paused) {
-            imageProxy.close()
-            return
-        }
+    override fun updateFrame(bitmap: Bitmap, timestampMs: Long) {
+        if (paused) return
         // 30fps 입력을 ~10fps로 다운샘플링 — 배터리/발열 절감. 검출은 터치 시점에만 실행되므로 레이턴시 영향 없음.
-        if (frameSkipCounter++ % 3 != 0) {
-            imageProxy.close()
-            return
-        }
+        if (frameSkipCounter++ % 3 != 0) return
 
         try {
-            val rawBitmap = imageProxyToBitmap(imageProxy) ?: return
-            val rotation = imageProxy.imageInfo.rotationDegrees
-
-            val upright = if (rotation != 0) {
-                val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-                val rotated = Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
-                if (rotated != rawBitmap) rawBitmap.recycle()
-                rotated
-            } else {
-                rawBitmap
-            }
+            // FrameSource는 콜백 직후 비트맵을 recycle하므로 사본 보존 필수
+            val copy = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
 
             synchronized(bitmapLock) {
                 latestBitmap?.recycle()
-                latestBitmap = upright
+                latestBitmap = copy
             }
         } catch (e: Exception) {
             Log.e(TAG, "프레임 업데이트 실패", e)
-        } finally {
-            imageProxy.close()
         }
     }
 
@@ -364,35 +345,6 @@ class YoloDetectionProvider(
         val areaA = (a.right - a.left) * (a.bottom - a.top)
         val areaB = (b.right - b.left) * (b.bottom - b.top)
         return inter / (areaA + areaB - inter + 1e-6f)
-    }
-
-    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
-        return try {
-            val planes = imageProxy.planes
-            val buffer: ByteBuffer = planes[0].buffer
-            val pixelStride = planes[0].pixelStride
-            val rowStride = planes[0].rowStride
-            val rowPadding = rowStride - pixelStride * imageProxy.width
-
-            val bitmap = Bitmap.createBitmap(
-                imageProxy.width + rowPadding / pixelStride,
-                imageProxy.height,
-                Bitmap.Config.ARGB_8888
-            )
-            buffer.rewind()
-            bitmap.copyPixelsFromBuffer(buffer)
-
-            if (rowPadding > 0) {
-                val cropped = Bitmap.createBitmap(bitmap, 0, 0, imageProxy.width, imageProxy.height)
-                if (cropped != bitmap) bitmap.recycle()
-                cropped
-            } else {
-                bitmap
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "ImageProxy→Bitmap 변환 실패", e)
-            null
-        }
     }
 
     override fun close() {

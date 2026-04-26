@@ -1,17 +1,12 @@
 package com.vrtmv.app.ui.camera
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
-import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -51,6 +46,11 @@ import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.google.ar.core.ArCoreApk
+import com.vrtmv.app.data.camera.ArCoreFrameSource
+import com.vrtmv.app.data.camera.CameraXFrameSource
+import com.vrtmv.app.data.camera.FrameListener
+import com.vrtmv.app.data.camera.FrameSource
 import com.vrtmv.app.data.inference.VlmMode
 import com.vrtmv.app.ui.overlay.DetectionOverlay
 import com.vrtmv.app.ui.overlay.GazeCrosshair
@@ -63,7 +63,8 @@ import com.vrtmv.app.ui.theme.StatusError
 import com.vrtmv.app.ui.theme.SurfaceElevated
 import com.vrtmv.app.ui.theme.TextPrimary
 import com.vrtmv.app.ui.theme.TextSecondary
-import java.util.concurrent.Executors
+
+private const val TAG = "CameraScreen"
 
 @Composable
 fun CameraScreen(
@@ -108,6 +109,44 @@ fun CameraScreen(
     }
 }
 
+/**
+ * 사용자 토글([useArCore])과 ARCore 가용성을 함께 고려하여 [FrameSource] 를 생성한다.
+ * - useArCore=false → 항상 CameraX
+ * - useArCore=true + SUPPORTED + 정상 Session 생성 → ARCore 백엔드
+ * - useArCore=true + 미지원/Session 실패 → CameraX 자동 폴백
+ *
+ * 결과는 logcat 에 명시적으로 기록 — 과제 시연/검증 시 어느 백엔드인지 즉시 확인.
+ */
+private fun selectFrameSource(context: Context, useArCore: Boolean): FrameSource {
+    if (!useArCore) {
+        Log.i(TAG, "FrameSource=CameraX (사용자 토글 OFF)")
+        return CameraXFrameSource(context)
+    }
+
+    val availability = try {
+        ArCoreApk.getInstance().checkAvailability(context)
+    } catch (e: Throwable) {
+        Log.w(TAG, "ARCore checkAvailability 실패", e)
+        null
+    }
+    Log.i(TAG, "ARCore availability=$availability")
+
+    if (availability != null && availability.isSupported && !availability.isTransient) {
+        try {
+            val source = ArCoreFrameSource(context)
+            Log.i(TAG, "FrameSource=ArCore (월드 앵커 활성화)")
+            return source
+        } catch (e: Throwable) {
+            Log.w(TAG, "ARCore Session 생성 실패 — CameraX 폴백", e)
+        }
+    } else {
+        Log.i(TAG, "ARCore 미지원/미준비 — CameraX 폴백 (avail=$availability)")
+    }
+    return CameraXFrameSource(context).also {
+        Log.i(TAG, "FrameSource=CameraX (폴백 경로)")
+    }
+}
+
 @Composable
 private fun CameraContent(viewModel: CameraViewModel) {
     val context = LocalContext.current
@@ -119,21 +158,40 @@ private fun CameraContent(viewModel: CameraViewModel) {
 
     // 검출기 인스턴스는 ViewModel 소유 (onCleared에서 해제)
     val detectionProvider = viewModel.detectionProvider
-    val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
 
     // 손 제스처 검출 — 터치와 병행. AssetPathResolver 주입은 ViewModel 팩토리가 담당.
     val gestureDetector = remember {
         viewModel.createGestureDetector(
             onUpdate = { x, y, progress -> viewModel.onPointingUpdate(x, y, progress) },
-            onConfirmed = { x, y -> viewModel.onPointingConfirmed(x, y, viewSize.width, viewSize.height) },
+            onConfirmed = { x, y, dx, dy ->
+                viewModel.onPointingConfirmed(x, y, dx, dy, viewSize.width, viewSize.height)
+            },
             onLost = { viewModel.onPointingLost() }
         )
     }
 
+    // FrameSource 선택 — Composition 동안 1회. ViewModel 의 useArCore 토글 + 가용성에 따라 결정.
+    val frameSource = remember { selectFrameSource(context, viewModel.useArCore) }
+
+    // 두 소비자(제스처 → 검출기) 를 단일 리스너로 묶어 등록.
+    val frameListener = remember {
+        FrameListener { bitmap, ts ->
+            gestureDetector.process(bitmap, ts)
+            detectionProvider.updateFrame(bitmap, ts)
+        }
+    }
+
     DisposableEffect(Unit) {
+        frameSource.addListener(frameListener)
+        // ARCore 백엔드인 경우 VM 에 소스를 전달해 anchor 추종 콜백 연결
+        if (frameSource is ArCoreFrameSource) {
+            viewModel.attachArCoreSource(frameSource)
+        }
+        frameSource.start(lifecycleOwner)
         onDispose {
+            frameSource.removeListener(frameListener)
+            frameSource.close()
             gestureDetector.close()
-            analyzerExecutor.shutdown()
         }
     }
 
@@ -158,53 +216,9 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 )
             }
     ) {
-        // Layer 1: Camera preview
+        // Layer 1: Camera preview — FrameSource 가 PreviewView 또는 GLSurfaceView 를 노출
         AndroidView(
-            factory = { ctx ->
-                val previewView = PreviewView(ctx).apply {
-                    scaleType = PreviewView.ScaleType.FILL_CENTER
-                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                }
-
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-
-                cameraProviderFuture.addListener({
-                    val cameraProvider = cameraProviderFuture.get()
-
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
-
-                    @Suppress("DEPRECATION")
-                    val imageAnalysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setTargetResolution(Size(640, 480))
-                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                        .build()
-                        .also { analysis ->
-                            analysis.setAnalyzer(analyzerExecutor) { imageProxy ->
-                                // 두 소비자 병행 — gestureDetector는 ImageProxy를 닫지 않으므로
-                                // 먼저 호출하고 마지막에 detectionProvider가 close() 담당
-                                gestureDetector.process(imageProxy)
-                                detectionProvider.updateFrame(imageProxy)
-                            }
-                        }
-
-                    try {
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            imageAnalysis
-                        )
-                    } catch (e: Exception) {
-                        Log.e("CameraScreen", "Camera binding failed", e)
-                    }
-                }, ContextCompat.getMainExecutor(ctx))
-
-                previewView
-            },
+            factory = { frameSource.view },
             modifier = Modifier.fillMaxSize()
         )
 
@@ -220,6 +234,9 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 inferenceState = uiState.inferenceState,
                 coordinateMapper = coordinateMapper!!,
                 tapPoint = uiState.tapPoint,
+                anchoredTagPosition = uiState.anchoredTagPosition,
+                arAnchorActive = uiState.arAnchorActive,
+                vlmMode = uiState.vlmMode,
                 modifier = Modifier.fillMaxSize()
             )
         }

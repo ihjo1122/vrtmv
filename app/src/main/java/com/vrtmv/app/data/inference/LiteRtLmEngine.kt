@@ -261,15 +261,17 @@ class LiteRtLmEngine @Inject constructor(
     fun getCurrentModelId(): String? = currentModelId
     fun getActiveBackend(): String = activeBackend
 
+    /** 모든 추론 경로 공통 fallback — "X이(가) 감지되었습니다" 같은 trivial 텍스트 제거. */
+    private val commonFallback = "설명을 불러오지 못했습니다. 다시 시도해 주세요."
+
     override suspend fun describe(image: Bitmap, label: String, confidence: Float): String {
         val prompt = PromptBuilder.buildVisionPrompt(label)
-        val fallback = "${label}이(가) 감지되었습니다."
-        return infer(image, prompt, fallback)
+        return infer(image, prompt, commonFallback)
     }
 
     override suspend fun describeScene(image: Bitmap): String {
         val prompt = PromptBuilder.buildScenePrompt()
-        return infer(image, prompt, "장면을 분석할 수 없습니다.")
+        return infer(image, prompt, commonFallback)
     }
 
     private suspend fun infer(image: Bitmap, prompt: String, fallback: String): String {
@@ -279,13 +281,13 @@ class LiteRtLmEngine @Inject constructor(
                 if (currentEngine == null) {
                     return@withContext when (val s = loadState) {
                         LoadState.FileMissing ->
-                            "모델 파일을 찾을 수 없습니다.\n앱을 재시작해 다운로드를 확인해주세요."
+                            "모델 파일을 찾을 수 없습니다. 앱을 재시작해 다운로드를 확인해 주세요."
                         is LoadState.Failed ->
-                            "모델 초기화 실패: ${s.reason}\n기기 호환성을 확인해주세요."
+                            "모델 초기화 실패: ${s.reason}"
                         LoadState.NotLoaded ->
                             "모델이 아직 로드되지 않았습니다."
                         LoadState.Ready ->
-                            fallback
+                            fallback  // race condition — "설명을 불러오지 못했습니다"
                     }
                 }
 
@@ -323,7 +325,20 @@ class LiteRtLmEngine @Inject constructor(
                                 "원본=${rawText.length}자 → 정제=${cleaned.length}자"
                         )
                         Log.d(TAG, "원본: '${rawText.replace("\n", " ")}' → 정제: '$cleaned'")
-                        cleaned.ifEmpty { fallback }
+                        // 정제가 모든 내용을 제거한 경우 → 원문이 할루시네이션(loop) 이면 fallback,
+                        // 아니면 원문을 살려서 보여줌.
+                        when {
+                            cleaned.isNotEmpty() -> cleaned
+                            rawText.isBlank() -> fallback
+                            PromptBuilder.isLoopyHallucination(rawText) -> {
+                                Log.w(TAG, "반복 할루시네이션 감지 — fallback 사용")
+                                fallback
+                            }
+                            else -> {
+                                Log.w(TAG, "정제 결과 비어있음 — 원문 사용")
+                                rawText.trim().take(80)
+                            }
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "추론 실패", e)

@@ -27,6 +27,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.sp
+import com.vrtmv.app.data.inference.VlmMode
 import com.vrtmv.app.domain.model.DetectedObject
 import com.vrtmv.app.domain.model.InferenceState
 import com.vrtmv.app.ui.theme.ArTeal
@@ -47,6 +48,15 @@ fun DetectionOverlay(
     inferenceState: InferenceState = InferenceState.Idle,
     coordinateMapper: CoordinateMapper,
     tapPoint: Offset? = null,
+    /**
+     * ARCore 앵커가 뷰프러스텀 안일 때 매 프레임 갱신되는 화면 좌표. 프러스텀 밖이면 null.
+     * [arAnchorActive] 와 함께 사용 — null+active=true 면 "앵커 존재하지만 화면 밖" → 태그 숨김.
+     */
+    anchoredTagPosition: Offset? = null,
+    /** ARCore anchor 생성·유지 상태. true 면 태그는 오직 anchor 를 따르며, 없으면 숨김(정적 박스 폴백 없음). */
+    arAnchorActive: Boolean = false,
+    /** VLM ON 일 때는 객체 바운더리(브래킷/점선/스캔라인) 시각요소를 숨기고 결과 태그만 표시. */
+    vlmMode: VlmMode = VlmMode.OFF,
     modifier: Modifier = Modifier
 ) {
     val textMeasurer = rememberTextMeasurer()
@@ -79,7 +89,41 @@ fun DetectionOverlay(
     )
 
     Canvas(modifier = modifier) {
-        // 추론 모드에서는 미선택 박스/라벨 노출을 생략 — 선택 객체만 강조.
+        // ARCore anchor 가 존재하면 태그 위치는 전적으로 anchor 추종 —
+        // 프러스텀 밖(anchoredTagPosition == null) 이면 태그를 그리지 않는다(정적 box 폴백 없음).
+        // 단, 로딩 인디케이터는 화면 중앙 고정이므로 anchor 가시성과 무관하게 표시.
+        if (arAnchorActive) {
+            if (inferenceState is InferenceState.Loading) {
+                drawLoadingBar(size.width / 2, size.height / 2, shimmerProgress, textMeasurer, dotCycle)
+            } else if (anchoredTagPosition != null) {
+                if (selectedObject != null) {
+                    drawSelectedObject(
+                        obj = selectedObject,
+                        left = 0f, top = 0f, width = 0f, height = 0f,  // 바운더리 미사용 dummy
+                        scanProgress = scanProgress,
+                        cornerPulse = cornerPulse,
+                        inferenceState = inferenceState,
+                        textMeasurer = textMeasurer,
+                        shimmerProgress = shimmerProgress,
+                        dotCycle = dotCycle,
+                        anchoredTagPosition = anchoredTagPosition,
+                        showBoundary = false
+                    )
+                } else if (inferenceState !is InferenceState.Idle) {
+                    drawSceneTag(
+                        tapX = anchoredTagPosition.x, tapY = anchoredTagPosition.y,
+                        cornerPulse = cornerPulse,
+                        inferenceState = inferenceState,
+                        textMeasurer = textMeasurer,
+                        shimmerProgress = shimmerProgress,
+                        dotCycle = dotCycle
+                    )
+                }
+            }
+            return@Canvas
+        }
+
+        // ARCore 미활성(CameraX 폴백 등) — 기존 정적 박스/좌표 기반 렌더.
         selectedObject?.let { obj ->
             val viewRect = coordinateMapper.mapToView(obj.boundingBox)
             drawSelectedObject(
@@ -91,11 +135,12 @@ fun DetectionOverlay(
                 inferenceState = inferenceState,
                 textMeasurer = textMeasurer,
                 shimmerProgress = shimmerProgress,
-                dotCycle = dotCycle
+                dotCycle = dotCycle,
+                anchoredTagPosition = null,
+                showBoundary = vlmMode == VlmMode.OFF
             )
         }
 
-        // 객체 미선택 + 터치 좌표 → 장면 추론 태그
         if (selectedObject == null && tapPoint != null &&
             inferenceState !is InferenceState.Idle
         ) {
@@ -122,40 +167,45 @@ private fun DrawScope.drawSelectedObject(
     inferenceState: InferenceState,
     textMeasurer: androidx.compose.ui.text.TextMeasurer,
     shimmerProgress: Float,
-    dotCycle: Float
+    dotCycle: Float,
+    anchoredTagPosition: Offset?,
+    /** false 면 fill/border/brackets/scanLine 등 박스 시각요소를 모두 숨기고 결과 태그만 그린다 (VLM ON). */
+    showBoundary: Boolean
 ) {
     val cornerLen = minOf(width, height) * 0.2f
 
-    // Fill
-    drawRoundRect(
-        color = AccentCyanFill,
-        topLeft = Offset(left, top),
-        size = Size(width, height),
-        cornerRadius = CornerRadius(4f, 4f)
-    )
+    if (showBoundary) {
+        // Fill
+        drawRoundRect(
+            color = AccentCyanFill,
+            topLeft = Offset(left, top),
+            size = Size(width, height),
+            cornerRadius = CornerRadius(4f, 4f)
+        )
 
-    // Dashed border
-    drawRoundRect(
-        color = AccentCyanDim,
-        topLeft = Offset(left, top),
-        size = Size(width, height),
-        cornerRadius = CornerRadius(4f, 4f),
-        style = Stroke(width = 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
-    )
+        // Dashed border
+        drawRoundRect(
+            color = AccentCyanDim,
+            topLeft = Offset(left, top),
+            size = Size(width, height),
+            cornerRadius = CornerRadius(4f, 4f),
+            style = Stroke(width = 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
+        )
 
-    // Corner brackets + glow
-    val bracketColor = AccentCyan.copy(alpha = cornerPulse)
-    drawCornerBrackets(left, top, width, height, cornerLen, 3f, bracketColor)
-    drawCornerBrackets(left, top, width, height, cornerLen, 7f, bracketColor.copy(alpha = cornerPulse * 0.12f))
+        // Corner brackets + glow
+        val bracketColor = AccentCyan.copy(alpha = cornerPulse)
+        drawCornerBrackets(left, top, width, height, cornerLen, 3f, bracketColor)
+        drawCornerBrackets(left, top, width, height, cornerLen, 7f, bracketColor.copy(alpha = cornerPulse * 0.12f))
 
-    // Scan line
-    val scanY = top + height * scanProgress
-    drawLine(
-        color = AccentCyan.copy(alpha = 0.5f),
-        start = Offset(left + 2f, scanY),
-        end = Offset(left + width - 2f, scanY),
-        strokeWidth = 1.5f
-    )
+        // Scan line
+        val scanY = top + height * scanProgress
+        drawLine(
+            color = AccentCyan.copy(alpha = 0.5f),
+            start = Offset(left + 2f, scanY),
+            end = Offset(left + width - 2f, scanY),
+            strokeWidth = 1.5f
+        )
+    }
 
     // ── 로딩바 (화면 정중앙) ──
     if (inferenceState is InferenceState.Loading) {
@@ -163,11 +213,25 @@ private fun DrawScope.drawSelectedObject(
     }
 
     // ── AR 결과 태그 ──
+    // ARCore 앵커가 활성이면 태그 위치가 그 좌표를 추종(앵커 점 위/아래로 작은 영역).
+    // 그렇지 않으면 정적 박스의 위/아래에 부착.
     if (inferenceState is InferenceState.Success || inferenceState is InferenceState.Idle) {
+        val tagAnchorX: Float
+        val tagAnchorTop: Float
+        val tagAnchorBottom: Float
+        if (anchoredTagPosition != null) {
+            tagAnchorX = anchoredTagPosition.x
+            tagAnchorTop = anchoredTagPosition.y - 10f
+            tagAnchorBottom = anchoredTagPosition.y + 10f
+        } else {
+            tagAnchorX = left + width / 2
+            tagAnchorTop = top
+            tagAnchorBottom = top + height
+        }
         drawArResultTag(
-            anchorX = left + width / 2,
-            anchorTop = top,
-            anchorBottom = top + height,
+            anchorX = tagAnchorX,
+            anchorTop = tagAnchorTop,
+            anchorBottom = tagAnchorBottom,
             obj = obj,
             inferenceState = inferenceState,
             textMeasurer = textMeasurer
@@ -232,8 +296,8 @@ private fun DrawScope.drawArResultTag(
     inferenceState: InferenceState,
     textMeasurer: androidx.compose.ui.text.TextMeasurer
 ) {
-    // Idle 상태에선 라벨+신뢰도만 표시
-    val title = "${obj.label.uppercase()}  ${(obj.confidence * 100).toInt()}%"
+    // 객체 라벨/신뢰도 대신 고정 타이틀 — 장면 태그(SCENE)와 동일 스타일.
+    val title = "VISION"
     val desc = when (inferenceState) {
         is InferenceState.Success -> inferenceState.text
         else -> null

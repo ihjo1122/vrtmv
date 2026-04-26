@@ -19,10 +19,13 @@ MainScreen
 
 ## 주요 데이터 흐름
 ```
-CameraX ImageAnalysis (매 프레임, 단일 analyzer)
-  → HandGestureDetector.process(imageProxy)          // 손 포인팅 실시간 추적
-  → DetectionProvider.updateFrame(imageProxy)         // 객체 검출용 프레임 버퍼링 (~10fps, frameSkipCounter % 3 — 30fps 입력 기준)
-  (두 소비자 병행, imageProxy는 updateFrame()이 close 담당)
+FrameSource (백엔드: CameraXFrameSource 또는 ArCoreFrameSource — Main 토글)
+  → upright Bitmap 변환(소스 책임)
+  → FrameListener 디스패치
+      → HandGestureDetector.process(bitmap, ts)        // 손 포인팅 실시간 추적
+      → DetectionProvider.updateFrame(bitmap, ts)      // 객체 검출용 프레임 버퍼링 (~10fps, frameSkipCounter % 3)
+  (콜백 종료 직후 소스가 비트맵 recycle — 보존 필요 시 사본 생성)
+  (ARCore 백엔드는 추가로 GL thread 매 프레임 ArFrameCallback 호출 → AnchorProjector 로 anchor 투영)
 
 사용자 입력 (추론 중이면 차단)
   A) 화면 탭                                    → CameraViewModel.onTapDetect(offset, viewW, viewH)
@@ -30,7 +33,8 @@ CameraX ImageAnalysis (매 프레임, 단일 analyzer)
   → 공통 경로:
     → DetectionProvider.detectNow()               // 현재 프레임 복사 → 검출 (MediaPipe 또는 YOLO)
     → GazeTargetResolver.resolve(point, objects, mapper)
-    → selectedObject + capturedBitmap              // AR 태그 표시
+    → ARCore 활성 시: arSource.latestFrame.hitTest(screenX,Y) → Anchor 생성 (또는 전방 1.5m fallback)
+    → selectedObject + capturedBitmap + (anchor)   // AR 태그 표시
 
 VLM 추론 (VLM 모드가 ON일 때)
   → 객체 검출됨: RoiCropper.crop → LiteRtLmEngine.describe → AR 태그 설명
@@ -61,5 +65,13 @@ VLM 추론 (VLM 모드가 ON일 때)
 - **비선택 객체**: 반투명 흰색 코너 브래킷 + 작은 라벨
 - **크로스헤어**: 노란색 원+십자선 (터치 위치에만 표시)
 - **포인팅 프로그레스 링**: 시안색 원호 (검지 끝 위치, 0~360° 차오름)
-- **장면 AR 태그**: 객체 미검출 시 터치 좌표에 펄스 원 + 커넥터 + 장면 설명 태그
+- **장면 AR 태그**: 객체 미검출 시 터치 좌표(또는 ARCore 앵커 위치)에 펄스 원 + 커넥터 + 장면 설명 태그
+- **앵커 추종 태그 (ARCore 모드)**: `anchoredTagPosition != null` 이면 결과 태그가 정적 박스 중심이 아닌 매 프레임 투영된 anchor 좌표를 추종 — 카메라 이동에 따라 실세계에 고정. 박스/브래킷 자체는 검출 시점 좌표로 정적.
 - **하단 카드**: Idle→힌트, Loading→진행바, Error→에러, Scene→장면 설명
+
+## 카메라 백엔드 추상화 (FrameSource)
+- **공통 인터페이스**: `start(lifecycleOwner) / stop / addListener / removeListener / close / view: View`
+- **CameraXFrameSource**: `PreviewView` 노출. `ImageAnalysis` analyzer 에서 `ImageProxyConverter.toUprightBitmap` 호출 → 리스너 디스패치 → recycle.
+- **ArCoreFrameSource**: `GLSurfaceView` 노출. GL thread `onDrawFrame` 마다 `Session.update()` → `BackgroundRenderer.draw()` (카메라 텍스처) → `Frame.acquireCameraImage()` → `YuvToBitmapConverter.convert()` (90° 회전 포함) → 워커 스레드(SynchronousQueue + AbortPolicy)에서 리스너 디스패치 → recycle. 워커 바쁠 시 즉시 드롭(자동 frame skip).
+- **Anchor 흐름**: 탭 시 `arSource.latestFrame.hitTest()` → `Anchor` 또는 전방 1.5m fallback. VM 의 `ArFrameCallback` 가 매 GL 프레임에서 `AnchorProjector` 로 화면 좌표 갱신 → `CameraUiState.anchoredTagPosition` → `DetectionOverlay` 가 태그 위치로 사용.
+- **폴백 결정**: `CameraScreen.selectFrameSource(useArCore)` — 토글 OFF 또는 `ArCoreApk.checkAvailability()` 미지원/transient 또는 `Session()` 생성 예외 → CameraXFrameSource. 결과는 logcat 명시 (`FrameSource=ArCore` / `FrameSource=CameraX`).

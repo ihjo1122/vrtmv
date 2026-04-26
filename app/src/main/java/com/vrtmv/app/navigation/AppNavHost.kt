@@ -15,9 +15,10 @@ import com.vrtmv.app.ui.main.MainScreen
 object NavRoutes {
     const val INTRO = "intro"
     const val MAIN = "main"
-    const val CAMERA = "camera/{modelId}/{detectorId}"
+    const val CAMERA = "camera/{modelId}/{detectorId}/{useArCore}/{fullFrameVlm}"
 
-    fun cameraRoute(modelId: String, detectorId: String) = "camera/$modelId/$detectorId"
+    fun cameraRoute(modelId: String, detectorId: String, useArCore: Boolean, fullFrameVlm: Boolean) =
+        "camera/$modelId/$detectorId/$useArCore/$fullFrameVlm"
 }
 
 @Composable
@@ -40,8 +41,8 @@ fun AppNavHost() {
 
         composable(NavRoutes.MAIN) {
             MainScreen(
-                onNavigateToCamera = { modelId, detectorId ->
-                    navController.navigate(NavRoutes.cameraRoute(modelId, detectorId))
+                onNavigateToCamera = { modelId, detectorId, useArCore, fullFrameVlm ->
+                    navController.navigate(NavRoutes.cameraRoute(modelId, detectorId, useArCore, fullFrameVlm))
                 }
             )
         }
@@ -56,6 +57,14 @@ fun AppNavHost() {
                 navArgument("detectorId") {
                     type = NavType.StringType
                     defaultValue = DetectorKind.MEDIAPIPE.id
+                },
+                navArgument("useArCore") {
+                    type = NavType.BoolType
+                    defaultValue = false
+                },
+                navArgument("fullFrameVlm") {
+                    type = NavType.BoolType
+                    defaultValue = true
                 }
             )
         ) {

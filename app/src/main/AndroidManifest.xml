@@ -21,6 +21,9 @@
         <!-- LiteRT-LM GPU 가속 -->
         <uses-native-library android:name="libOpenCL.so" android:required="false" />
 
+        <!-- ARCore: optional — 미지원 기기는 CameraX 폴백 경로로 동작 -->
+        <meta-data android:name="com.google.ar.core" android:value="optional" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
