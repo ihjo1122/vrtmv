@@ -9,7 +9,6 @@ import android.util.Log
 import com.vrtmv.app.BuildConfig
 import com.vrtmv.app.domain.model.AssetInfo
 import com.vrtmv.app.domain.model.ModelInfo
-import com.vrtmv.app.domain.model.ModelRegistry
 import com.vrtmv.app.util.AssetPathResolver
 import com.vrtmv.app.util.ModelPathResolver
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -24,11 +23,6 @@ import java.net.URL
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/**
- * 멀티 모델 다운로드 관리자.
- * Android DownloadManager를 사용하여 모델을 다운로드한다.
- * 다운로드 경로: Download/vrtmv/{fileName}
- */
 @Singleton
 class ModelDownloadManager @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -37,31 +31,38 @@ class ModelDownloadManager @Inject constructor(
 ) {
     companion object {
         private const val TAG = "ModelDownload"
+        // HF 리다이렉트 결과는 S3 pre-signed URL 이라 자체 만료가 있어 보수적으로 30분 캐시.
+        private const val HF_REDIRECT_CACHE_TTL_MS = 30L * 60 * 1000
+        private const val HF_PREFS = "vrtmv_download_cache"
     }
 
     private val downloadManager =
         context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
 
-    // ── 기본 모델용 (기존 IntroScreen 호환) ──────────────────────
-
-    /** 기본 모델 파일이 이미 존재하는지 확인 */
-    suspend fun modelExists(): Boolean = modelExists(ModelRegistry.getDefaultModel())
-
-    /** 기본 모델 다운로드 시작 */
-    suspend fun startDownload(): Long = startDownload(ModelRegistry.getDefaultModel())
+    private val redirectPrefs by lazy {
+        context.getSharedPreferences(HF_PREFS, Context.MODE_PRIVATE)
+    }
 
     /**
      * HF 리다이렉트 선행 해석.
-     * Android DownloadManager는 3xx 응답을 따라갈 때 원본 Authorization 헤더를 재전송하는데,
-     * HF는 S3 pre-signed URL(X-Amz-Signature 포함)로 302 리다이렉트하므로 S3가
-     * "Only one auth mechanism allowed" 400 에러로 거부한다.
-     * HEAD 요청으로 pre-signed URL만 미리 얻어 DownloadManager에 넘기면 이 충돌을 피할 수 있다.
-     * 해석 실패 시 원본 URL 반환 — 호출자는 그 경우 auth 헤더를 유지한다.
+     * Android DownloadManager 는 3xx 응답에서 원본 Authorization 헤더를 재전송하는데
+     * HF 는 S3 pre-signed URL(X-Amz-Signature 포함)로 302 리다이렉트하므로 S3 가
+     * "Only one auth mechanism allowed" 400 으로 거부한다. HEAD 로 pre-signed URL 만
+     * 미리 얻어 DownloadManager 에 넘기면 충돌 회피. 해석 실패 시 null 반환 → 호출자가
+     * 원본 URL 로 폴백하며 auth 헤더를 유지한다.
      */
     private suspend fun resolveHfRedirect(originalUrl: String): String? = withContext(Dispatchers.IO) {
         if (BuildConfig.HF_TOKEN.isEmpty() || !originalUrl.contains("huggingface.co")) {
             return@withContext null
         }
+
+        val cachedUrl = redirectPrefs.getString("url:$originalUrl", null)
+        val cachedAt = redirectPrefs.getLong("ts:$originalUrl", 0L)
+        if (cachedUrl != null && System.currentTimeMillis() - cachedAt < HF_REDIRECT_CACHE_TTL_MS) {
+            Log.d(TAG, "HF 리다이렉트 캐시 적중")
+            return@withContext cachedUrl
+        }
+
         try {
             val conn = (URL(originalUrl).openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = false
@@ -76,6 +77,10 @@ class ModelDownloadManager @Inject constructor(
                     val location = conn.getHeaderField("Location")
                     if (!location.isNullOrEmpty()) {
                         Log.d(TAG, "HF 리다이렉트 해석 성공")
+                        redirectPrefs.edit()
+                            .putString("url:$originalUrl", location)
+                            .putLong("ts:$originalUrl", System.currentTimeMillis())
+                            .apply()
                         return@withContext location
                     }
                 }
@@ -90,46 +95,21 @@ class ModelDownloadManager @Inject constructor(
         }
     }
 
-    // ── 멀티 모델 지원 ──────────────────────────────────────────
-
-    /** 지정 모델 파일이 존재하는지 확인 (ModelPathResolver에 위임). */
     suspend fun modelExists(modelInfo: ModelInfo): Boolean = withContext(Dispatchers.IO) {
         pathResolver.modelExists(modelInfo)
     }
 
-    /** 지정 모델의 진행 중인 다운로드 확인. 리다이렉트 해석 후 URL이 달라지므로 파일명(description)으로 매칭. */
-    fun findExistingDownload(modelInfo: ModelInfo): Long? {
-        val query = DownloadManager.Query()
-            .setFilterByStatus(
-                DownloadManager.STATUS_RUNNING or DownloadManager.STATUS_PENDING or DownloadManager.STATUS_PAUSED
-            )
-        val cursor = downloadManager.query(query)
-        cursor?.use {
-            while (it.moveToNext()) {
-                val description = it.getString(it.getColumnIndexOrThrow(DownloadManager.COLUMN_DESCRIPTION))
-                if (description == modelInfo.fileName) {
-                    return it.getLong(it.getColumnIndexOrThrow(DownloadManager.COLUMN_ID))
-                }
-            }
-        }
-        return null
-    }
+    // 진행 중 다운로드는 리다이렉트 해석 후 URL 이 달라지므로 fileName(description)으로 매칭한다.
+    fun findExistingDownload(modelInfo: ModelInfo): Long? =
+        findActiveDownload(modelInfo.fileName)
 
-    /**
-     * 지정 모델 다운로드를 시작한다.
-     * @return 다운로드 ID
-     * @throws InsufficientStorageException 저장공간 부족 시
-     */
     suspend fun startDownload(modelInfo: ModelInfo): Long {
-        // 다운로드 URL이 비어있으면 수동 배치 모델
         if (modelInfo.downloadUrl.isBlank()) {
             throw ManualInstallRequiredException(modelInfo)
         }
 
-        // 기존 진행 중인 다운로드가 있으면 그대로 사용
         findExistingDownload(modelInfo)?.let { return it }
 
-        // 저장공간 확인 — 앱 전용 외부 저장소 기준
         val requiredBytes = modelInfo.expectedSizeMB.toLong() * 1024 * 1024
         val modelsDir = pathResolver.modelsDir()
         val stat = StatFs(modelsDir.absolutePath)
@@ -141,20 +121,65 @@ class ModelDownloadManager @Inject constructor(
             )
         }
 
-        // HF 리다이렉트 선행 해석 — 성공 시 pre-signed URL을 받고 auth 헤더 없이 enqueue
-        val resolvedUrl = resolveHfRedirect(modelInfo.downloadUrl)
-        val finalUrl = resolvedUrl ?: modelInfo.downloadUrl
+        return enqueue(
+            fileName = modelInfo.fileName,
+            displayName = modelInfo.displayName,
+            titlePrefix = "모델",
+            downloadUrl = modelInfo.downloadUrl,
+            relativePath = "${ModelPathResolver.MODEL_SUBDIR}/${modelInfo.fileName}"
+        )
+    }
 
-        // 앱 전용 외부 저장소에 저장 — 권한 불필요, File API로 직접 접근 가능
-        val request = DownloadManager.Request(Uri.parse(finalUrl))
-            .setTitle("VRTMV 모델: ${modelInfo.displayName}")
-            .setDescription(modelInfo.fileName)
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
-            .setDestinationInExternalFilesDir(
-                context,
-                null,
-                "${ModelPathResolver.MODEL_SUBDIR}/${modelInfo.fileName}"
+    suspend fun assetExists(asset: AssetInfo): Boolean = withContext(Dispatchers.IO) {
+        assetPathResolver.assetExists(asset)
+    }
+
+    fun findExistingAssetDownload(asset: AssetInfo): Long? =
+        findActiveDownload(asset.fileName)
+
+    suspend fun startAssetDownload(asset: AssetInfo): Long {
+        findExistingAssetDownload(asset)?.let { return it }
+        return enqueue(
+            fileName = asset.fileName,
+            displayName = asset.displayName,
+            titlePrefix = "자산",
+            downloadUrl = asset.downloadUrl,
+            relativePath = "${AssetPathResolver.ASSET_SUBDIR}/${asset.fileName}"
+        )
+    }
+
+    private fun findActiveDownload(fileName: String): Long? {
+        val query = DownloadManager.Query()
+            .setFilterByStatus(
+                DownloadManager.STATUS_RUNNING or DownloadManager.STATUS_PENDING or DownloadManager.STATUS_PAUSED
             )
+        val cursor = downloadManager.query(query)
+        cursor?.use {
+            while (it.moveToNext()) {
+                val description = it.getString(it.getColumnIndexOrThrow(DownloadManager.COLUMN_DESCRIPTION))
+                if (description == fileName) {
+                    return it.getLong(it.getColumnIndexOrThrow(DownloadManager.COLUMN_ID))
+                }
+            }
+        }
+        return null
+    }
+
+    private suspend fun enqueue(
+        fileName: String,
+        displayName: String,
+        titlePrefix: String,
+        downloadUrl: String,
+        relativePath: String
+    ): Long {
+        val resolvedUrl = resolveHfRedirect(downloadUrl)
+        val finalUrl = resolvedUrl ?: downloadUrl
+
+        val request = DownloadManager.Request(Uri.parse(finalUrl))
+            .setTitle("VRTMV $titlePrefix: $displayName")
+            .setDescription(fileName)
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+            .setDestinationInExternalFilesDir(context, null, relativePath)
             .setAllowedOverMetered(true)
             .setAllowedOverRoaming(false)
 
@@ -164,70 +189,10 @@ class ModelDownloadManager @Inject constructor(
         }
 
         val downloadId = downloadManager.enqueue(request)
-        Log.d(TAG, "다운로드 시작: ${modelInfo.displayName} ID=$downloadId (resolved=${resolvedUrl != null})")
+        Log.d(TAG, "다운로드 시작: $displayName ID=$downloadId (resolved=${resolvedUrl != null})")
         return downloadId
     }
 
-    // ── 보조 자산(YOLO, 제스처 등) 다운로드 ──────────────────────
-
-    /** 자산이 이미 존재하는지 (부분 다운로드 배제 포함). */
-    suspend fun assetExists(asset: AssetInfo): Boolean = withContext(Dispatchers.IO) {
-        assetPathResolver.assetExists(asset)
-    }
-
-    /** 진행 중인 자산 다운로드가 있으면 해당 ID 반환 (파일명으로 매칭). */
-    fun findExistingAssetDownload(asset: AssetInfo): Long? {
-        val query = DownloadManager.Query()
-            .setFilterByStatus(
-                DownloadManager.STATUS_RUNNING or DownloadManager.STATUS_PENDING or DownloadManager.STATUS_PAUSED
-            )
-        val cursor = downloadManager.query(query)
-        cursor?.use {
-            while (it.moveToNext()) {
-                val description = it.getString(it.getColumnIndexOrThrow(DownloadManager.COLUMN_DESCRIPTION))
-                if (description == asset.fileName) {
-                    return it.getLong(it.getColumnIndexOrThrow(DownloadManager.COLUMN_ID))
-                }
-            }
-        }
-        return null
-    }
-
-    /**
-     * 자산 다운로드를 시작한다.
-     * 저장 위치: `context.getExternalFilesDir(null)/vrtmv-assets/{fileName}` (앱 전용, 권한 불필요)
-     */
-    suspend fun startAssetDownload(asset: AssetInfo): Long {
-        findExistingAssetDownload(asset)?.let { return it }
-
-        // HF 리다이렉트 선행 해석 (모델 다운로드와 동일 로직)
-        val resolvedUrl = resolveHfRedirect(asset.downloadUrl)
-        val finalUrl = resolvedUrl ?: asset.downloadUrl
-
-        val request = DownloadManager.Request(Uri.parse(finalUrl))
-            .setTitle("VRTMV 자산: ${asset.displayName}")
-            .setDescription(asset.fileName)
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
-            .setDestinationInExternalFilesDir(
-                context,
-                null,
-                "${AssetPathResolver.ASSET_SUBDIR}/${asset.fileName}"
-            )
-            .setAllowedOverMetered(true)
-            .setAllowedOverRoaming(false)
-
-        if (resolvedUrl == null && BuildConfig.HF_TOKEN.isNotEmpty() && finalUrl.contains("huggingface.co")) {
-            request.addRequestHeader("Authorization", "Bearer ${BuildConfig.HF_TOKEN}")
-        }
-
-        val downloadId = downloadManager.enqueue(request)
-        Log.d(TAG, "자산 다운로드 시작: ${asset.displayName} ID=$downloadId (resolved=${resolvedUrl != null})")
-        return downloadId
-    }
-
-    // ── 공통 진행률 관찰 ─────────────────────────────────────────
-
-    /** 다운로드 진행률 관찰 (500ms 폴링) */
     fun observeProgress(downloadId: Long): Flow<DownloadProgress> = flow {
         while (true) {
             val progress = queryProgress(downloadId)
@@ -268,12 +233,10 @@ class ModelDownloadManager @Inject constructor(
     }
 }
 
-/** 수동 배치 필요 예외 (downloadUrl이 비어있는 모델) */
 class ManualInstallRequiredException(
     val modelInfo: ModelInfo
 ) : Exception("수동 설치 필요: adb push ${modelInfo.fileName} /sdcard/Download/vrtmv/")
 
-/** 저장공간 부족 예외 */
 class InsufficientStorageException(
     val required: Int,
     val available: Int

@@ -46,8 +46,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vrtmv.app.ui.components.AppHeader
 import com.vrtmv.app.ui.components.GradientProgressBar
@@ -76,10 +74,8 @@ fun IntroScreen(
             .fillMaxSize()
             .background(SurfaceDark)
     ) {
-        // HUD Background
         HudBackground()
 
-        // App branding (center) with entrance animation
         val headerVisible = remember { MutableTransitionState(false).apply { targetState = true } }
         AnimatedVisibility(
             visibleState = headerVisible,
@@ -89,7 +85,6 @@ fun IntroScreen(
             AppHeader(titleSize = 48.sp)
         }
 
-        // Bottom status area
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -219,14 +214,9 @@ fun IntroScreen(
     }
 }
 
-/**
- * HUD-style background: radial glow + grid pattern.
- * Shared between IntroScreen and MainScreen.
- */
 @Composable
 fun HudBackground(modifier: Modifier = Modifier) {
     Canvas(modifier = modifier.fillMaxSize()) {
-        // Radial glow at upper center
         drawCircle(
             brush = Brush.radialGradient(
                 colors = listOf(
@@ -241,18 +231,15 @@ fun HudBackground(modifier: Modifier = Modifier) {
             center = Offset(size.width / 2, size.height * 0.35f)
         )
 
-        // Grid lines
         val gridSpacing = 80.dp.toPx()
         val gridColor = TextTertiary.copy(alpha = 0.04f)
         val strokeWidth = 0.5.dp.toPx()
 
-        // Vertical lines
         var x = gridSpacing
         while (x < size.width) {
             drawLine(gridColor, Offset(x, 0f), Offset(x, size.height), strokeWidth)
             x += gridSpacing
         }
-        // Horizontal lines
         var y = gridSpacing
         while (y < size.height) {
             drawLine(gridColor, Offset(0f, y), Offset(size.width, y), strokeWidth)

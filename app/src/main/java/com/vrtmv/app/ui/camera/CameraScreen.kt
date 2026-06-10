@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -17,9 +18,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
@@ -36,7 +39,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -51,13 +53,12 @@ import com.vrtmv.app.data.camera.ArCoreFrameSource
 import com.vrtmv.app.data.camera.CameraXFrameSource
 import com.vrtmv.app.data.camera.FrameListener
 import com.vrtmv.app.data.camera.FrameSource
-import com.vrtmv.app.data.inference.VlmMode
+import com.vrtmv.app.data.recording.CaptureMode
+import com.vrtmv.app.domain.model.InferenceState
 import com.vrtmv.app.ui.overlay.DetectionOverlay
 import com.vrtmv.app.ui.overlay.GazeCrosshair
-import com.vrtmv.app.ui.overlay.PointingProgressRing
 import com.vrtmv.app.ui.components.ResultCard
 import com.vrtmv.app.ui.theme.ArCyan
-import com.vrtmv.app.ui.theme.ArTeal
 import com.vrtmv.app.ui.theme.OverlayTagBg
 import com.vrtmv.app.ui.theme.StatusError
 import com.vrtmv.app.ui.theme.SurfaceElevated
@@ -109,20 +110,8 @@ fun CameraScreen(
     }
 }
 
-/**
- * 사용자 토글([useArCore])과 ARCore 가용성을 함께 고려하여 [FrameSource] 를 생성한다.
- * - useArCore=false → 항상 CameraX
- * - useArCore=true + SUPPORTED + 정상 Session 생성 → ARCore 백엔드
- * - useArCore=true + 미지원/Session 실패 → CameraX 자동 폴백
- *
- * 결과는 logcat 에 명시적으로 기록 — 과제 시연/검증 시 어느 백엔드인지 즉시 확인.
- */
-private fun selectFrameSource(context: Context, useArCore: Boolean): FrameSource {
-    if (!useArCore) {
-        Log.i(TAG, "FrameSource=CameraX (사용자 토글 OFF)")
-        return CameraXFrameSource(context)
-    }
-
+// ARCore 항상 우선 시도, 미지원/Session 생성 실패 시 CameraX 자동 폴백.
+private fun selectFrameSource(context: Context): FrameSource {
     val availability = try {
         ArCoreApk.getInstance().checkAvailability(context)
     } catch (e: Throwable) {
@@ -156,34 +145,22 @@ private fun CameraContent(viewModel: CameraViewModel) {
 
     var viewSize by remember { mutableStateOf(androidx.compose.ui.geometry.Size.Zero) }
 
-    // 검출기 인스턴스는 ViewModel 소유 (onCleared에서 해제)
-    val detectionProvider = viewModel.detectionProvider
+    val frameProvider = viewModel.frameProvider
+    val captureMode = viewModel.captureMode
+    val isObjectMode = captureMode.isObjectMode
+    val isFullFrameMode = captureMode == CaptureMode.FULL_FRAME
 
-    // 손 제스처 검출 — 터치와 병행. AssetPathResolver 주입은 ViewModel 팩토리가 담당.
-    val gestureDetector = remember {
-        viewModel.createGestureDetector(
-            onUpdate = { x, y, progress -> viewModel.onPointingUpdate(x, y, progress) },
-            onConfirmed = { x, y, dx, dy ->
-                viewModel.onPointingConfirmed(x, y, dx, dy, viewSize.width, viewSize.height)
-            },
-            onLost = { viewModel.onPointingLost() }
-        )
-    }
+    val frameSource = remember { selectFrameSource(context) }
 
-    // FrameSource 선택 — Composition 동안 1회. ViewModel 의 useArCore 토글 + 가용성에 따라 결정.
-    val frameSource = remember { selectFrameSource(context, viewModel.useArCore) }
-
-    // 두 소비자(제스처 → 검출기) 를 단일 리스너로 묶어 등록.
     val frameListener = remember {
         FrameListener { bitmap, ts ->
-            gestureDetector.process(bitmap, ts)
-            detectionProvider.updateFrame(bitmap, ts)
+            viewModel.reportFrame(ts)
+            frameProvider.updateFrame(bitmap, ts)
         }
     }
 
     DisposableEffect(Unit) {
         frameSource.addListener(frameListener)
-        // ARCore 백엔드인 경우 VM 에 소스를 전달해 anchor 추종 콜백 연결
         if (frameSource is ArCoreFrameSource) {
             viewModel.attachArCoreSource(frameSource)
         }
@@ -191,7 +168,13 @@ private fun CameraContent(viewModel: CameraViewModel) {
         onDispose {
             frameSource.removeListener(frameListener)
             frameSource.close()
-            gestureDetector.close()
+        }
+    }
+
+    // 토스트 메시지 수신 — 객체 탐지 실패 안내 등
+    LaunchedEffect(Unit) {
+        viewModel.userMessages.collect { msg ->
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -201,31 +184,30 @@ private fun CameraContent(viewModel: CameraViewModel) {
         modifier = Modifier
             .fillMaxSize()
             .onSizeChanged { viewSize = it.toSize() }
-            .pointerInput(Unit) {
+            .pointerInput(isObjectMode) {
                 detectTapGestures(
                     onTap = { offset ->
+                        if (!isObjectMode) return@detectTapGestures
                         viewModel.onTapDetect(
                             tapPoint = offset,
                             viewWidth = viewSize.width,
                             viewHeight = viewSize.height
                         )
                     },
-                    onLongPress = {
-                        viewModel.clearSelection()
-                    }
+                    onLongPress = { viewModel.clearSelection() }
                 )
             }
     ) {
-        // Layer 1: Camera preview — FrameSource 가 PreviewView 또는 GLSurfaceView 를 노출
         AndroidView(
             factory = { frameSource.view },
             modifier = Modifier.fillMaxSize()
         )
 
-        // Layer 2: AR overlay
+        // FULL_FRAME 에서도 AR anchored tag / scene tag 가 떠야 하므로 isObjectMode 필터 제거.
+        // FULL 모드는 detectedObjects 가 빈 리스트라 박스는 어차피 그려지지 않음.
         val showOverlay = coordinateMapper != null && (
             uiState.detectedObjects.isNotEmpty() ||
-            (uiState.tapPoint != null && uiState.inferenceState !is com.vrtmv.app.domain.model.InferenceState.Idle)
+            (uiState.tapPoint != null && uiState.inferenceState !is InferenceState.Idle)
         )
         if (showOverlay) {
             DetectionOverlay(
@@ -236,48 +218,65 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 tapPoint = uiState.tapPoint,
                 anchoredTagPosition = uiState.anchoredTagPosition,
                 arAnchorActive = uiState.arAnchorActive,
-                vlmMode = uiState.vlmMode,
                 modifier = Modifier.fillMaxSize()
             )
         }
 
-        // Layer 3: Tap crosshair
-        uiState.tapPoint?.let { point ->
-            GazeCrosshair(
-                position = point,
-                modifier = Modifier.fillMaxSize()
-            )
-        }
-
-        // Layer 3b: 포인팅 홀드 진행률 링 (손 제스처 캡처 중)
-        uiState.pointingPosition?.let { normPos ->
-            if (viewSize.width > 0 && viewSize.height > 0) {
-                val screenPos = androidx.compose.ui.geometry.Offset(
-                    normPos.x * viewSize.width,
-                    normPos.y * viewSize.height
-                )
-                PointingProgressRing(
-                    position = screenPos,
-                    progress = uiState.pointingProgress,
+        if (isObjectMode) {
+            uiState.tapPoint?.let { point ->
+                GazeCrosshair(
+                    position = point,
                     modifier = Modifier.fillMaxSize()
                 )
             }
         }
 
-        // Layer 4: Bottom hint / result card
-        ResultCard(
-            inferenceState = uiState.inferenceState,
-            selectedObject = uiState.selectedObject,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(16.dp)
-        )
+        // FULL_FRAME 모드는 시작 버튼이 액션 어포던스 역할을 하므로 HINT 카드를 생략한다.
+        if (!isFullFrameMode) {
+            ResultCard(
+                inferenceState = uiState.inferenceState,
+                selectedObject = uiState.selectedObject,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(16.dp)
+            )
+        }
 
-        // Layer 4.5: Stop / Clear button
-        val showStopButton = uiState.inferenceState is com.vrtmv.app.domain.model.InferenceState.Loading
-        val showClearButton = uiState.inferenceState is com.vrtmv.app.domain.model.InferenceState.Success ||
-            uiState.inferenceState is com.vrtmv.app.domain.model.InferenceState.Error ||
-            (uiState.inferenceState is com.vrtmv.app.domain.model.InferenceState.Idle && uiState.selectedObject != null)
+        if (isFullFrameMode) {
+            val isLoading = uiState.inferenceState is InferenceState.Loading
+            Button(
+                onClick = {
+                    viewModel.startFullFrameCapture(viewSize.width, viewSize.height)
+                },
+                enabled = !isLoading && !modelLoading,
+                shape = RoundedCornerShape(28.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = ArCyan,
+                    contentColor = SurfaceElevated,
+                    disabledContainerColor = ArCyan.copy(alpha = 0.35f),
+                    disabledContentColor = SurfaceElevated.copy(alpha = 0.6f)
+                ),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 84.dp)
+                    .size(width = 200.dp, height = 60.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(22.dp)
+                )
+                Text(
+                    text = if (isLoading) "추론 중..." else "시작",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(start = 8.dp)
+                )
+            }
+        }
+
+        val showStopButton = uiState.inferenceState is InferenceState.Loading
+        // 모든 모드/상태에서 클린 버튼(X) 노출. Loading 시는 Stop 으로 대체.
+        val showClearButton = !showStopButton
 
         if (showStopButton) {
             FilledTonalIconButton(
@@ -289,7 +288,7 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 ),
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 104.dp, end = 16.dp)
+                    .padding(top = 48.dp, end = 16.dp)
                     .size(48.dp)
             ) {
                 Icon(
@@ -308,7 +307,7 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 ),
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 104.dp, end = 16.dp)
+                    .padding(top = 48.dp, end = 16.dp)
                     .size(48.dp)
             ) {
                 Icon(
@@ -319,16 +318,6 @@ private fun CameraContent(viewModel: CameraViewModel) {
             }
         }
 
-        // Layer 5: VLM mode toggle button
-        VlmToggleButton(
-            currentMode = uiState.vlmMode,
-            onToggle = { viewModel.toggleVlmMode() },
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 48.dp, end = 16.dp)
-        )
-
-        // Layer 6: Model name + inference time
         if (uiState.modelDisplayName.isNotEmpty()) {
             Row(
                 modifier = Modifier
@@ -347,6 +336,11 @@ private fun CameraContent(viewModel: CameraViewModel) {
                     color = ArCyan,
                     style = MaterialTheme.typography.labelMedium
                 )
+                Text(
+                    text = "· ${viewModel.captureMode.displayName}",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelSmall
+                )
                 if (uiState.inferenceTimeMs > 0) {
                     val sec = (uiState.inferenceTimeMs + 500) / 1000
                     Text(
@@ -358,7 +352,6 @@ private fun CameraContent(viewModel: CameraViewModel) {
             }
         }
 
-        // Layer 7: 모델 로딩 칩 (논블로킹) — 카메라 프리뷰는 즉시 보여주고 상단에 작은 인디케이터만 표시
         if (modelLoading) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -384,32 +377,5 @@ private fun CameraContent(viewModel: CameraViewModel) {
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun VlmToggleButton(
-    currentMode: VlmMode,
-    onToggle: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val isOn = currentMode == VlmMode.ON
-    val containerColor = if (isOn) ArTeal.copy(alpha = 0.85f) else Color.Black.copy(alpha = 0.5f)
-    val iconColor = if (isOn) Color.White else Color.White.copy(alpha = 0.5f)
-
-    FilledTonalIconButton(
-        onClick = onToggle,
-        shape = RoundedCornerShape(12.dp),
-        colors = IconButtonDefaults.filledTonalIconButtonColors(
-            containerColor = containerColor,
-            contentColor = iconColor
-        ),
-        modifier = modifier.size(48.dp)
-    ) {
-        Icon(
-            imageVector = Icons.Default.AutoAwesome,
-            contentDescription = "VLM Mode: ${currentMode.label}",
-            modifier = Modifier.size(22.dp)
-        )
     }
 }

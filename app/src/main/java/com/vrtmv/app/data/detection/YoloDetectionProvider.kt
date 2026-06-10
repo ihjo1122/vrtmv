@@ -6,7 +6,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.RectF
 import android.util.Log
-import com.vrtmv.app.domain.model.AssetRegistry
 import com.vrtmv.app.domain.model.DetectedObject
 import com.vrtmv.app.util.AssetPathResolver
 import org.tensorflow.lite.Interpreter
@@ -21,11 +20,9 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * YOLOv11n (TFLite) 기반 온디맨드 객체 검출기.
- *
- * - 입력: 640x640 letterbox, float32 [1, 640, 640, 3] (NHWC) — Ultralytics TFLite export 기본 포맷
- * - 출력: float32 [1, 84, 8400]  (4 bbox coords + 80 class scores, 8400 anchors)
- * - 좌표는 입력 640 공간 기준 → letterbox 역변환으로 원본 비트맵 좌표계로 복원
+ * YOLOv11n TFLite 검출기.
+ * 입력: 640x640 letterbox float32 NHWC. 출력 텐서 레이아웃은 Ultralytics export 버전마다
+ * [1,84,8400] / [1,8400,84] / 픽셀 또는 정규화 좌표가 섞여 나오므로 setup·첫 parse 에서 자동 감지.
  */
 class YoloDetectionProvider(
     private val context: Context,
@@ -34,16 +31,17 @@ class YoloDetectionProvider(
 
     companion object {
         private const val TAG = "YoloDet"
-        // HF 리포에 업로드된 실제 파일명과 일치 — "v" 제거
         private const val MODEL_FILE = "yolo11n_float16.tflite"
         private const val LABELS_FILE = "coco80_labels.txt"
         private const val INPUT_SIZE = 640
         private const val NUM_CLASSES = 80
         private const val NUM_CHANNELS = 4 + NUM_CLASSES  // 84
-        // YOLOv8/11 공식 예제 기본값 — MediaPipe(0.3)보다 낮게 설정해 recall 확보 후 NMS가 중복 필터링
+        // YOLOv8/11 공식 예제 기본값 — MediaPipe(0.3) 보다 낮게 잡아 recall 확보 후 NMS 가 중복 필터.
         private const val SCORE_THRESHOLD = 0.25f
         private const val IOU_THRESHOLD = 0.45f
         private const val MAX_RESULTS = 20
+        // 30fps 입력을 ~10fps 로 다운샘플링 — 검출은 터치 시점에만 실행되므로 레이턴시 영향 없음.
+        private const val FRAME_SKIP = 3
     }
 
     private var interpreter: Interpreter? = null
@@ -53,14 +51,11 @@ class YoloDetectionProvider(
     private var frameSkipCounter = 0
     @Volatile override var paused: Boolean = false
 
-    // 출력 텐서 레이아웃 — setup에서 실제 shape를 읽어 결정
-    // channelFirst=true: [1, 84, 8400] (PyTorch 스타일)
-    // channelFirst=false: [1, 8400, 84] (Ultralytics TFLite export에서 자주 나오는 형태)
+    // 출력 텐서 레이아웃 — channelFirst=true 면 [1,84,N], false 면 [1,N,84].
     private var channelFirst: Boolean = true
     private var numAnchors: Int = 8400
 
-    // bbox 좌표계 — Ultralytics export에 따라 픽셀(0~640) 또는 정규화(0~1)일 수 있음.
-    // 첫 parseOutput 호출 시 샘플링해서 자동 감지.
+    // bbox 좌표계 — Ultralytics export 에 따라 픽셀(0~640) 또는 정규화(0~1). 첫 parseOutput 에서 감지.
     private var coordsChecked: Boolean = false
     private var coordScale: Float = 1f
 
@@ -78,8 +73,8 @@ class YoloDetectionProvider(
                 return
             }
 
-            // GPU Delegate 제거 — YOLOv11n은 Android TFLite GPU delegate에서 낮은 confidence/크래시 이슈
-            // (Ultralytics issue #17837, #18245). CPU 4스레드로만 실행.
+            // GPU Delegate 제거 — YOLOv11n 은 Android TFLite GPU delegate 에서 낮은 confidence/크래시
+            // 이슈 (Ultralytics #17837, #18245). CPU 4스레드로만 실행.
             val options = Interpreter.Options().apply {
                 numThreads = 4
             }
@@ -87,8 +82,6 @@ class YoloDetectionProvider(
             val itp = Interpreter(model, options)
             interpreter = itp
 
-            // 출력 shape 자동 감지 — Ultralytics TFLite export는 버전에 따라
-            // [1, 84, 8400](channel-first) 또는 [1, 8400, 84](anchor-first)로 나옴.
             val inputShape = itp.getInputTensor(0).shape()
             val outputShape = itp.getOutputTensor(0).shape()
             Log.i(TAG, "YOLO 입력 shape=${inputShape.toList()}, 출력 shape=${outputShape.toList()}")
@@ -115,10 +108,6 @@ class YoloDetectionProvider(
         }
     }
 
-    /**
-     * 내부 저장소(`vrtmv-assets/yolo11n_float16.tflite`)에서 메모리 맵 로드.
-     * 파일이 없으면 null 반환 — graceful degradation.
-     */
     private fun loadModelFile(): MappedByteBuffer? {
         val path = assetPathResolver.findAssetPath(MODEL_FILE) ?: return null
         return RandomAccessFile(path, "r").use { raf ->
@@ -136,11 +125,9 @@ class YoloDetectionProvider(
 
     override fun updateFrame(bitmap: Bitmap, timestampMs: Long) {
         if (paused) return
-        // 30fps 입력을 ~10fps로 다운샘플링 — 배터리/발열 절감. 검출은 터치 시점에만 실행되므로 레이턴시 영향 없음.
-        if (frameSkipCounter++ % 3 != 0) return
+        if (frameSkipCounter++ % FRAME_SKIP != 0) return
 
         try {
-            // FrameSource는 콜백 직후 비트맵을 recycle하므로 사본 보존 필수
             val copy = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
 
             synchronized(bitmapLock) {
@@ -153,23 +140,34 @@ class YoloDetectionProvider(
     }
 
     override fun detectNow(): DetectionResult? {
-        val itp = interpreter ?: return null
-
         val frameCopy = synchronized(bitmapLock) {
             val bitmap = latestBitmap ?: return null
             bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false)
         }
 
-        return try {
-            val srcW = frameCopy.width
-            val srcH = frameCopy.height
-            val letterbox = letterboxToInputSize(frameCopy)
+        val objects = runInference(frameCopy) ?: return null
+        return DetectionResult(
+            objects = objects,
+            bitmap = frameCopy,
+            imageWidth = frameCopy.width,
+            imageHeight = frameCopy.height
+        )
+    }
 
-            // 입력: [1, 640, 640, 3] float32, 0~1 정규화
+    override fun detectOnBitmap(bitmap: Bitmap): List<DetectedObject> {
+        return runInference(bitmap) ?: emptyList()
+    }
+
+    private fun runInference(source: Bitmap): List<DetectedObject>? {
+        val itp = interpreter ?: return null
+        return try {
+            val srcW = source.width
+            val srcH = source.height
+            val letterbox = letterboxToInputSize(source)
+
             val input = bitmapToFloatBuffer(letterbox)
             letterbox.recycle()
 
-            // 출력 shape에 맞춰 버퍼 할당 — channelFirst=true면 [1,84,N], false면 [1,N,84]
             val (dim1, dim2) = if (channelFirst) NUM_CHANNELS to numAnchors else numAnchors to NUM_CHANNELS
             val output = Array(1) { Array(dim1) { FloatArray(dim2) } }
             itp.run(input, output)
@@ -182,20 +180,13 @@ class YoloDetectionProvider(
             val finalDetections = nonMaxSuppression(candidates, IOU_THRESHOLD, MAX_RESULTS)
 
             Log.d(TAG, "${finalDetections.size}개 객체 검출 (YOLO, ${srcW}x${srcH})")
-
-            DetectionResult(
-                objects = finalDetections,
-                bitmap = frameCopy,
-                imageWidth = srcW,
-                imageHeight = srcH
-            )
+            finalDetections
         } catch (e: Exception) {
             Log.e(TAG, "YOLO 검출 실패", e)
             null
         }
     }
 
-    /** 최신 프레임 사본만 반환 — 검출 미수행. */
     override fun captureFrame(): Bitmap? {
         return synchronized(bitmapLock) {
             val bitmap = latestBitmap ?: return null
@@ -203,7 +194,6 @@ class YoloDetectionProvider(
         }
     }
 
-    /** 원본 비트맵을 INPUT_SIZE x INPUT_SIZE로 letterbox 리사이즈 (종횡비 유지, 검정 패딩) */
     private fun letterboxToInputSize(src: Bitmap): Bitmap {
         val scale = min(INPUT_SIZE.toFloat() / src.width, INPUT_SIZE.toFloat() / src.height)
         val newW = (src.width * scale).toInt()
@@ -220,7 +210,6 @@ class YoloDetectionProvider(
         return result
     }
 
-    /** Bitmap → NHWC float32 ByteBuffer, 0~1 정규화 */
     private fun bitmapToFloatBuffer(bitmap: Bitmap): ByteBuffer {
         val buffer = ByteBuffer.allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3 * 4)
             .order(ByteOrder.nativeOrder())
@@ -238,11 +227,6 @@ class YoloDetectionProvider(
         return buffer
     }
 
-    /**
-     * YOLOv11 출력 → DetectedObject 후보 목록.
-     * 레이아웃은 [channelFirst]에 따라 [84][N] 또는 [N][84]로 해석.
-     * 각 앵커 i에 대해: bbox = (cx,cy,w,h) ch 0..3, class scores ch 4..83 (INPUT_SIZE 픽셀 좌표).
-     */
     private fun parseOutput(
         raw: Array<FloatArray>,
         scale: Float,
@@ -251,14 +235,13 @@ class YoloDetectionProvider(
         srcW: Int,
         srcH: Int
     ): List<DetectedObject> {
-        // 레이아웃 독립 접근자: (anchorIdx, channelIdx) → Float
         val get: (Int, Int) -> Float = if (channelFirst) {
             { a, c -> raw[c][a] }
         } else {
             { a, c -> raw[a][c] }
         }
 
-        // 좌표계 자동 감지 (최초 1회) — cx 최대값이 2 미만이면 정규화된 출력으로 간주
+        // 좌표계 자동 감지 — cx 최대값 < 2 이면 정규화 출력으로 간주.
         if (!coordsChecked) {
             var maxCx = 0f
             for (i in 0 until numAnchors) {
@@ -272,7 +255,6 @@ class YoloDetectionProvider(
 
         val results = ArrayList<DetectedObject>()
         for (i in 0 until numAnchors) {
-            // 최대 클래스 점수 찾기
             var bestClass = -1
             var bestScore = 0f
             for (c in 0 until NUM_CLASSES) {
@@ -313,7 +295,6 @@ class YoloDetectionProvider(
         return results
     }
 
-    /** Class-aware Non-Maximum Suppression */
     private fun nonMaxSuppression(
         detections: List<DetectedObject>,
         iouThreshold: Float,

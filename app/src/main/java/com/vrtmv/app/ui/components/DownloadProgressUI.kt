@@ -85,21 +85,18 @@ fun GradientProgressBar(
             .height(6.dp)
             .clip(RoundedCornerShape(3.dp))
     ) {
-        // Track
         drawRoundRect(
             color = trackColor,
             cornerRadius = CornerRadius(3.dp.toPx())
         )
 
         if (progress != null && progress > 0f) {
-            // Gradient fill
             val fillWidth = size.width * progress.coerceIn(0f, 1f)
             drawRoundRect(
                 brush = gradientBrush,
                 size = Size(fillWidth, size.height),
                 cornerRadius = CornerRadius(3.dp.toPx())
             )
-            // Glow at leading edge
             if (fillWidth > 4.dp.toPx()) {
                 drawCircle(
                     color = ArCyan.copy(alpha = 0.6f),
@@ -108,7 +105,7 @@ fun GradientProgressBar(
                 )
             }
         } else {
-            // Indeterminate shimmer placeholder
+            // 진행률 미상 시 30% 너비 인디케이터 — 실제 셰이머 애니메이션은 미구현
             val shimmerWidth = size.width * 0.3f
             drawRoundRect(
                 brush = gradientBrush,

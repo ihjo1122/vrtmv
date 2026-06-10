@@ -5,20 +5,10 @@ import android.graphics.Matrix
 import android.util.Log
 import androidx.camera.core.ImageProxy
 
-/**
- * CameraX [ImageProxy] (RGBA_8888) → upright [Bitmap] 변환.
- *
- * 호출자가 반환된 비트맵의 recycle 책임을 진다.
- */
 object ImageProxyConverter {
     private const val TAG = "ImageProxyConv"
 
-    /**
-     * RGBA_8888 출력 포맷의 ImageProxy 픽셀 버퍼를 ARGB_8888 Bitmap으로 복사하고,
-     * 센서 회전(`imageInfo.rotationDegrees`)을 적용하여 upright 상태로 반환한다.
-     *
-     * @return 변환 성공 시 신규 Bitmap, 실패 시 null.
-     */
+    // imageInfo.rotationDegrees 만큼 회전해 upright 로 반환. 호출자가 recycle 책임.
     fun toUprightBitmap(imageProxy: ImageProxy): Bitmap? {
         return try {
             val raw = copyPixels(imageProxy) ?: return null
@@ -42,6 +32,7 @@ object ImageProxyConverter {
         val buffer = planes[0].buffer
         val pixelStride = planes[0].pixelStride
         val rowStride = planes[0].rowStride
+        // RGBA_8888 plane 은 행마다 padding 이 있을 수 있어 너비를 한 번 늘려 복사 후 재크롭.
         val rowPadding = rowStride - pixelStride * imageProxy.width
 
         val bitmap = Bitmap.createBitmap(

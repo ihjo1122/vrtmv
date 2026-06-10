@@ -6,7 +6,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.vrtmv.app.domain.model.DetectorKind
+import com.vrtmv.app.data.recording.CaptureMode
 import com.vrtmv.app.domain.model.ModelRegistry
 import com.vrtmv.app.ui.camera.CameraScreen
 import com.vrtmv.app.ui.intro.IntroScreen
@@ -15,10 +15,10 @@ import com.vrtmv.app.ui.main.MainScreen
 object NavRoutes {
     const val INTRO = "intro"
     const val MAIN = "main"
-    const val CAMERA = "camera/{modelId}/{detectorId}/{useArCore}/{fullFrameVlm}"
+    const val CAMERA = "camera/{modelId}/{captureMode}"
 
-    fun cameraRoute(modelId: String, detectorId: String, useArCore: Boolean, fullFrameVlm: Boolean) =
-        "camera/$modelId/$detectorId/$useArCore/$fullFrameVlm"
+    fun cameraRoute(modelId: String, captureMode: CaptureMode) =
+        "camera/$modelId/${captureMode.id}"
 }
 
 @Composable
@@ -41,8 +41,8 @@ fun AppNavHost() {
 
         composable(NavRoutes.MAIN) {
             MainScreen(
-                onNavigateToCamera = { modelId, detectorId, useArCore, fullFrameVlm ->
-                    navController.navigate(NavRoutes.cameraRoute(modelId, detectorId, useArCore, fullFrameVlm))
+                onNavigateToCamera = { modelId, captureMode ->
+                    navController.navigate(NavRoutes.cameraRoute(modelId, captureMode))
                 }
             )
         }
@@ -54,17 +54,9 @@ fun AppNavHost() {
                     type = NavType.StringType
                     defaultValue = ModelRegistry.DEFAULT_MODEL_ID
                 },
-                navArgument("detectorId") {
+                navArgument("captureMode") {
                     type = NavType.StringType
-                    defaultValue = DetectorKind.MEDIAPIPE.id
-                },
-                navArgument("useArCore") {
-                    type = NavType.BoolType
-                    defaultValue = false
-                },
-                navArgument("fullFrameVlm") {
-                    type = NavType.BoolType
-                    defaultValue = true
+                    defaultValue = CaptureMode.OBJECT_DETECTION.id
                 }
             )
         ) {

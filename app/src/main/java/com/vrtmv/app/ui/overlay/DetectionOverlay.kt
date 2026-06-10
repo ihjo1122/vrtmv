@@ -15,8 +15,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextStyle
@@ -27,7 +27,6 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.sp
-import com.vrtmv.app.data.inference.VlmMode
 import com.vrtmv.app.domain.model.DetectedObject
 import com.vrtmv.app.domain.model.InferenceState
 import com.vrtmv.app.ui.theme.ArTeal
@@ -55,8 +54,6 @@ fun DetectionOverlay(
     anchoredTagPosition: Offset? = null,
     /** ARCore anchor 생성·유지 상태. true 면 태그는 오직 anchor 를 따르며, 없으면 숨김(정적 박스 폴백 없음). */
     arAnchorActive: Boolean = false,
-    /** VLM ON 일 때는 객체 바운더리(브래킷/점선/스캔라인) 시각요소를 숨기고 결과 태그만 표시. */
-    vlmMode: VlmMode = VlmMode.OFF,
     modifier: Modifier = Modifier
 ) {
     val textMeasurer = rememberTextMeasurer()
@@ -88,42 +85,16 @@ fun DetectionOverlay(
         label = "dotCycle"
     )
 
-    Canvas(modifier = modifier) {
-        // ARCore anchor 가 존재하면 태그 위치는 전적으로 anchor 추종 —
-        // 프러스텀 밖(anchoredTagPosition == null) 이면 태그를 그리지 않는다(정적 box 폴백 없음).
-        // 단, 로딩 인디케이터는 화면 중앙 고정이므로 anchor 가시성과 무관하게 표시.
-        if (arAnchorActive) {
-            if (inferenceState is InferenceState.Loading) {
-                drawLoadingBar(size.width / 2, size.height / 2, shimmerProgress, textMeasurer, dotCycle)
-            } else if (anchoredTagPosition != null) {
-                if (selectedObject != null) {
-                    drawSelectedObject(
-                        obj = selectedObject,
-                        left = 0f, top = 0f, width = 0f, height = 0f,  // 바운더리 미사용 dummy
-                        scanProgress = scanProgress,
-                        cornerPulse = cornerPulse,
-                        inferenceState = inferenceState,
-                        textMeasurer = textMeasurer,
-                        shimmerProgress = shimmerProgress,
-                        dotCycle = dotCycle,
-                        anchoredTagPosition = anchoredTagPosition,
-                        showBoundary = false
-                    )
-                } else if (inferenceState !is InferenceState.Idle) {
-                    drawSceneTag(
-                        tapX = anchoredTagPosition.x, tapY = anchoredTagPosition.y,
-                        cornerPulse = cornerPulse,
-                        inferenceState = inferenceState,
-                        textMeasurer = textMeasurer,
-                        shimmerProgress = shimmerProgress,
-                        dotCycle = dotCycle
-                    )
-                }
-            }
-            return@Canvas
-        }
+    // 글래스 카드 대각선 specular sweep (6초 주기, -0.2→1.2 로 양끝 off-card 진출)
+    val specularSweep by infiniteTransition.animateFloat(
+        initialValue = -0.2f, targetValue = 1.2f,
+        animationSpec = infiniteRepeatable(tween(6000, easing = LinearEasing), RepeatMode.Restart),
+        label = "specularSweep"
+    )
 
-        // ARCore 미활성(CameraX 폴백 등) — 기존 정적 박스/좌표 기반 렌더.
+    Canvas(modifier = modifier) {
+        // 박스 시각요소는 항상 정적 좌표(coordinateMapper) 기반으로 그리고,
+        // 결과 태그만 ARCore anchor 가 활성이면 그 위치를 추종한다.
         selectedObject?.let { obj ->
             val viewRect = coordinateMapper.mapToView(obj.boundingBox)
             drawSelectedObject(
@@ -136,29 +107,39 @@ fun DetectionOverlay(
                 textMeasurer = textMeasurer,
                 shimmerProgress = shimmerProgress,
                 dotCycle = dotCycle,
-                anchoredTagPosition = null,
-                showBoundary = vlmMode == VlmMode.OFF
+                specularSweep = specularSweep,
+                anchoredTagPosition = if (arAnchorActive) anchoredTagPosition else null,
+                // 분석 중에만 박스 시각요소 노출. 결과 노출 직후에는 결과 태그만 남기고 박스는 숨김.
+                showBoundary = inferenceState is InferenceState.Loading
             )
+            return@Canvas
         }
 
-        if (selectedObject == null && tapPoint != null &&
-            inferenceState !is InferenceState.Idle
-        ) {
+        // selectedObject 가 없을 때 — 전체 이미지 모드 / 검출 fallback.
+        // anchor 가 활성이고 프러스텀 안이면 anchor 추종, 그 외엔(anchor 미생성/프러스텀 밖) tapPoint 정적 표시.
+        val sceneAnchor: Offset? = when {
+            arAnchorActive && anchoredTagPosition != null -> anchoredTagPosition
+            else -> tapPoint
+        }
+        if (sceneAnchor != null && inferenceState !is InferenceState.Idle) {
             drawSceneTag(
-                tapX = tapPoint.x, tapY = tapPoint.y,
+                tapX = sceneAnchor.x, tapY = sceneAnchor.y,
                 cornerPulse = cornerPulse,
                 inferenceState = inferenceState,
                 textMeasurer = textMeasurer,
                 shimmerProgress = shimmerProgress,
-                dotCycle = dotCycle
+                dotCycle = dotCycle,
+                specularSweep = specularSweep
             )
+            return@Canvas
+        }
+
+        // 폴백: anchor/tapPoint 모두 없는데 로딩 상태이면 화면 중앙에 로딩바.
+        if (inferenceState is InferenceState.Loading) {
+            drawLoadingBar(size.width / 2, size.height / 2, shimmerProgress, textMeasurer, dotCycle, specularSweep)
         }
     }
 }
-
-// ════════════════════════════════════════════════════════════════
-// 선택된 객체
-// ════════════════════════════════════════════════════════════════
 
 private fun DrawScope.drawSelectedObject(
     obj: DetectedObject,
@@ -168,6 +149,7 @@ private fun DrawScope.drawSelectedObject(
     textMeasurer: androidx.compose.ui.text.TextMeasurer,
     shimmerProgress: Float,
     dotCycle: Float,
+    specularSweep: Float,
     anchoredTagPosition: Offset?,
     /** false 면 fill/border/brackets/scanLine 등 박스 시각요소를 모두 숨기고 결과 태그만 그린다 (VLM ON). */
     showBoundary: Boolean
@@ -175,7 +157,6 @@ private fun DrawScope.drawSelectedObject(
     val cornerLen = minOf(width, height) * 0.2f
 
     if (showBoundary) {
-        // Fill
         drawRoundRect(
             color = AccentCyanFill,
             topLeft = Offset(left, top),
@@ -183,7 +164,6 @@ private fun DrawScope.drawSelectedObject(
             cornerRadius = CornerRadius(4f, 4f)
         )
 
-        // Dashed border
         drawRoundRect(
             color = AccentCyanDim,
             topLeft = Offset(left, top),
@@ -192,12 +172,10 @@ private fun DrawScope.drawSelectedObject(
             style = Stroke(width = 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
         )
 
-        // Corner brackets + glow
         val bracketColor = AccentCyan.copy(alpha = cornerPulse)
         drawCornerBrackets(left, top, width, height, cornerLen, 3f, bracketColor)
         drawCornerBrackets(left, top, width, height, cornerLen, 7f, bracketColor.copy(alpha = cornerPulse * 0.12f))
 
-        // Scan line
         val scanY = top + height * scanProgress
         drawLine(
             color = AccentCyan.copy(alpha = 0.5f),
@@ -207,14 +185,11 @@ private fun DrawScope.drawSelectedObject(
         )
     }
 
-    // ── 로딩바 (화면 정중앙) ──
     if (inferenceState is InferenceState.Loading) {
-        drawLoadingBar(size.width / 2, size.height / 2, shimmerProgress, textMeasurer, dotCycle)
+        drawLoadingBar(size.width / 2, size.height / 2, shimmerProgress, textMeasurer, dotCycle, specularSweep)
     }
 
-    // ── AR 결과 태그 ──
-    // ARCore 앵커가 활성이면 태그 위치가 그 좌표를 추종(앵커 점 위/아래로 작은 영역).
-    // 그렇지 않으면 정적 박스의 위/아래에 부착.
+    // ARCore anchor 활성이면 태그가 그 좌표를 추종, 아니면 정적 박스 위/아래.
     if (inferenceState is InferenceState.Success || inferenceState is InferenceState.Idle) {
         val tagAnchorX: Float
         val tagAnchorTop: Float
@@ -234,14 +209,11 @@ private fun DrawScope.drawSelectedObject(
             anchorBottom = tagAnchorBottom,
             obj = obj,
             inferenceState = inferenceState,
-            textMeasurer = textMeasurer
+            textMeasurer = textMeasurer,
+            specularSweep = specularSweep
         )
     }
 }
-
-// ════════════════════════════════════════════════════════════════
-// 장면 태그 (객체 미검출 시 탭 위치)
-// ════════════════════════════════════════════════════════════════
 
 private fun DrawScope.drawSceneTag(
     tapX: Float, tapY: Float,
@@ -249,19 +221,17 @@ private fun DrawScope.drawSceneTag(
     inferenceState: InferenceState,
     textMeasurer: androidx.compose.ui.text.TextMeasurer,
     shimmerProgress: Float,
-    dotCycle: Float
+    dotCycle: Float,
+    specularSweep: Float
 ) {
-    // 터치 포인트 원형 펄스
     drawCircle(color = AccentCyan.copy(alpha = cornerPulse * 0.15f), radius = 30f, center = Offset(tapX, tapY))
     drawCircle(color = AccentCyan.copy(alpha = cornerPulse * 0.8f), radius = 5f, center = Offset(tapX, tapY))
 
-    // ── 로딩바 (화면 정중앙) ──
     if (inferenceState is InferenceState.Loading) {
-        drawLoadingBar(size.width / 2, size.height / 2, shimmerProgress, textMeasurer, dotCycle)
+        drawLoadingBar(size.width / 2, size.height / 2, shimmerProgress, textMeasurer, dotCycle, specularSweep)
         return
     }
 
-    // ── 결과 태그 ──
     val titleText: String
     val titleColor: Color
     when (inferenceState) {
@@ -282,21 +252,19 @@ private fun DrawScope.drawSceneTag(
         titleColor = titleColor,
         description = descText,
         textMeasurer = textMeasurer,
-        useConnector = true
+        useConnector = true,
+        specularSweep = specularSweep
     )
 }
-
-// ════════════════════════════════════════════════════════════════
-// AR 결과 태그 (선택 객체용)
-// ════════════════════════════════════════════════════════════════
 
 private fun DrawScope.drawArResultTag(
     anchorX: Float, anchorTop: Float, anchorBottom: Float,
     obj: DetectedObject,
     inferenceState: InferenceState,
-    textMeasurer: androidx.compose.ui.text.TextMeasurer
+    textMeasurer: androidx.compose.ui.text.TextMeasurer,
+    specularSweep: Float
 ) {
-    // 객체 라벨/신뢰도 대신 고정 타이틀 — 장면 태그(SCENE)와 동일 스타일.
+    // 객체 라벨/신뢰도 대신 고정 타이틀 — 장면 태그와 동일 스타일 통일.
     val title = "VISION"
     val desc = when (inferenceState) {
         is InferenceState.Success -> inferenceState.text
@@ -308,33 +276,48 @@ private fun DrawScope.drawArResultTag(
     val screenHeight = size.height
     val maxTagWidth = screenWidth * 0.8f
 
-    // ── 타이틀 측정 ──
-    val titleResult = textMeasurer.measure(
-        text = title,
-        style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, color = AccentCyan)
+    // 투명 배경 위 텍스트 가독성 확보용 그림자
+    val textShadow = Shadow(
+        color = Color.Black.copy(alpha = 0.65f),
+        offset = Offset(0f, 1.5f),
+        blurRadius = 3f
     )
 
-    // ── 설명 측정 ──
+    val titleResult = textMeasurer.measure(
+        text = title,
+        style = TextStyle(
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            color = AccentCyan,
+            shadow = textShadow
+        )
+    )
+
     val descMaxW = (maxTagWidth - padding * 2 - 8f).toInt().coerceAtLeast(200)
     val descResult = desc?.let {
         textMeasurer.measure(
             text = it,
-            style = TextStyle(fontSize = 12.sp, color = Color.White.copy(alpha = 0.92f), lineHeight = 18.sp),
+            style = TextStyle(
+                fontSize = 12.sp,
+                color = Color.White.copy(alpha = 0.92f),
+                lineHeight = 18.sp,
+                shadow = textShadow
+            ),
             constraints = Constraints(maxWidth = descMaxW),
             overflow = TextOverflow.Ellipsis,
             maxLines = 5
         )
     }
 
-    // ── 크기 계산 ──
     val separatorH = if (descResult != null) 8f else 0f
     val lineH = if (descResult != null) 1f else 0f
     val contentW = maxOf(titleResult.size.width.toFloat(), descResult?.size?.width?.toFloat() ?: 0f)
-    val tagWidth = (contentW + padding * 2 + 8f).coerceIn(140f, maxTagWidth) // 8f = 좌측 accent 영역
+    // 8f = 좌측 accent bar 영역
+    val tagWidth = (contentW + padding * 2 + 8f).coerceIn(140f, maxTagWidth)
     val tagHeight = padding + titleResult.size.height + separatorH + lineH +
         (descResult?.let { it.size.height + 8f } ?: 0f) + padding
 
-    // ── 위치 결정 ──
     val tagLeft = (anchorX - tagWidth / 2).coerceIn(4f, screenWidth - tagWidth - 4f)
     val tagGap = 10f
     val showBelow = (anchorTop - tagGap - tagHeight) < 4f
@@ -351,7 +334,6 @@ private fun DrawScope.drawArResultTag(
         connEnd = anchorTop
     }
 
-    // ── 커넥터 라인 ──
     drawLine(
         color = AccentCyan.copy(alpha = 0.3f),
         start = Offset(anchorX, connStart),
@@ -360,33 +342,46 @@ private fun DrawScope.drawArResultTag(
         pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 3f))
     )
 
-    // ── 태그 본체 ──
-    drawResultTagBody(tagLeft, tagTop, tagWidth, tagHeight, titleResult, descResult, padding, separatorH)
+    drawResultTagBody(tagLeft, tagTop, tagWidth, tagHeight, titleResult, descResult, padding, separatorH, specularSweep)
 }
-
-// ════════════════════════════════════════════════════════════════
-// 결과 패널 (장면 추론 결과용)
-// ════════════════════════════════════════════════════════════════
 
 private fun DrawScope.drawResultPanel(
     anchorX: Float, anchorY: Float,
     title: String, titleColor: Color, description: String,
     textMeasurer: androidx.compose.ui.text.TextMeasurer,
-    useConnector: Boolean
+    useConnector: Boolean,
+    specularSweep: Float
 ) {
     val padding = 12f
     val screenWidth = size.width
     val screenHeight = size.height
     val maxTagWidth = screenWidth * 0.8f
 
+    val textShadow = Shadow(
+        color = Color.Black.copy(alpha = 0.65f),
+        offset = Offset(0f, 1.5f),
+        blurRadius = 3f
+    )
+
     val titleResult = textMeasurer.measure(
         text = title,
-        style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, color = titleColor)
+        style = TextStyle(
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            color = titleColor,
+            shadow = textShadow
+        )
     )
     val descMaxW = (maxTagWidth - padding * 2 - 8f).toInt().coerceAtLeast(200)
     val descResult = textMeasurer.measure(
         text = description,
-        style = TextStyle(fontSize = 12.sp, color = Color.White.copy(alpha = 0.92f), lineHeight = 18.sp),
+        style = TextStyle(
+            fontSize = 12.sp,
+            color = Color.White.copy(alpha = 0.92f),
+            lineHeight = 18.sp,
+            shadow = textShadow
+        ),
         constraints = Constraints(maxWidth = descMaxW),
         overflow = TextOverflow.Ellipsis,
         maxLines = 5
@@ -417,57 +412,28 @@ private fun DrawScope.drawResultPanel(
         )
     }
 
-    drawResultTagBody(tagLeft, tagTop, tagWidth, tagHeight, titleResult, descResult, padding, 8f)
+    drawResultTagBody(tagLeft, tagTop, tagWidth, tagHeight, titleResult, descResult, padding, 8f, specularSweep)
 }
-
-// ════════════════════════════════════════════════════════════════
-// 태그 본체 렌더링 (공통)
-// ════════════════════════════════════════════════════════════════
 
 private fun DrawScope.drawResultTagBody(
     tagLeft: Float, tagTop: Float, tagWidth: Float, tagHeight: Float,
     titleResult: androidx.compose.ui.text.TextLayoutResult,
     descResult: androidx.compose.ui.text.TextLayoutResult?,
-    padding: Float, separatorH: Float
+    padding: Float, separatorH: Float,
+    specularSweep: Float
 ) {
-    val innerLeft = tagLeft + 8f // accent bar + gap
+    val innerLeft = tagLeft + 8f
+    val cornerR = 8f
 
-    // ── 배경: 글래스 효과 (이중 레이어) ──
-    // 외부 글로우
-    drawRoundRect(
-        color = AccentCyan.copy(alpha = 0.04f),
-        topLeft = Offset(tagLeft - 2f, tagTop - 2f),
-        size = Size(tagWidth + 4f, tagHeight + 4f),
-        cornerRadius = CornerRadius(10f, 10f)
-    )
-    // 메인 배경
-    drawRoundRect(
-        color = Color(0xE6101520),
-        topLeft = Offset(tagLeft, tagTop),
-        size = Size(tagWidth, tagHeight),
-        cornerRadius = CornerRadius(8f, 8f)
-    )
-    // 상단 하이라이트 (그라디언트)
-    drawRoundRect(
-        brush = Brush.verticalGradient(
-            colors = listOf(AccentCyan.copy(alpha = 0.08f), Color.Transparent),
-            startY = tagTop,
-            endY = tagTop + tagHeight * 0.4f
-        ),
-        topLeft = Offset(tagLeft, tagTop),
-        size = Size(tagWidth, tagHeight),
-        cornerRadius = CornerRadius(8f, 8f)
-    )
-    // 테두리
-    drawRoundRect(
-        color = AccentCyan.copy(alpha = 0.2f),
-        topLeft = Offset(tagLeft, tagTop),
-        size = Size(tagWidth, tagHeight),
-        cornerRadius = CornerRadius(8f, 8f),
-        style = Stroke(width = 1f)
-    )
+    drawGlassBackground(tagLeft, tagTop, tagWidth, tagHeight, cornerR, specularSweep)
 
-    // ── 좌측 accent bar (그라디언트) ──
+    // 좌측 accent bar — 외부 glow halo 5f + 메인 3f
+    drawRoundRect(
+        color = AccentCyan.copy(alpha = 0.25f),
+        topLeft = Offset(tagLeft, tagTop + 4f),
+        size = Size(5f, tagHeight - 8f),
+        cornerRadius = CornerRadius(3f, 3f)
+    )
     drawRoundRect(
         brush = Brush.verticalGradient(listOf(AccentCyan, ArTeal)),
         topLeft = Offset(tagLeft + 1f, tagTop + 6f),
@@ -475,17 +441,15 @@ private fun DrawScope.drawResultTagBody(
         cornerRadius = CornerRadius(2f, 2f)
     )
 
-    // ── 타이틀 ──
     drawText(
         textLayoutResult = titleResult,
         topLeft = Offset(innerLeft + padding, tagTop + padding)
     )
 
-    // ── 구분선 + 설명 ──
     if (descResult != null && separatorH > 0f) {
         val lineY = tagTop + padding + titleResult.size.height + separatorH / 2
         drawLine(
-            color = AccentCyan.copy(alpha = 0.15f),
+            color = AccentCyan.copy(alpha = 0.25f),
             start = Offset(innerLeft + padding, lineY),
             end = Offset(tagLeft + tagWidth - padding, lineY),
             strokeWidth = 0.5f
@@ -497,45 +461,173 @@ private fun DrawScope.drawResultTagBody(
     }
 }
 
-// ════════════════════════════════════════════════════════════════
-// 로딩바 (탭 위치 아래 수평 프로그레스)
-// ════════════════════════════════════════════════════════════════
-
 /**
- * 화면 정중앙에 표시되는 로딩 인디케이터.
- * 타원형 백배경 + "분석 중" + 순차 깜박이는 점 3개 + shimmer 프로그레스 바.
+ * 7-레이어 페이크 글래스 배경.
+ * Compose 가 backdrop blur 를 못 읽는 SurfaceView/GLSurfaceView 위에서도
+ * specular highlight + depth shadow 만으로 유리 같은 입체감을 만든다.
+ *
+ * 레이어:
+ *   1. drop shadow (떠 있는 느낌, 2-ring halo)
+ *   2. 메인 fill (translucent navy 22%)
+ *   3. 상단 ½ specular gradient (위에서 빛 받음)
+ *   4. 하단 ½ inner shadow gradient (글래스 두께감)
+ *   5. 상단 edge highlight 라인 (specular 모서리)
+ *   6. 하단 edge inner 라인 (depth)
+ *   7. 전체 border
+ *   + 6초 주기 대각선 specular sweep
  */
+private fun DrawScope.drawGlassBackground(
+    left: Float, top: Float, width: Float, height: Float,
+    cornerRadius: Float,
+    specularSweep: Float
+) {
+    val cr = CornerRadius(cornerRadius, cornerRadius)
+
+    // 1. drop shadow (2-ring halo — 떠 있는 느낌)
+    drawRoundRect(
+        color = Color.Black.copy(alpha = 0.10f),
+        topLeft = Offset(left - 4f, top + 1f),
+        size = Size(width + 8f, height + 8f),
+        cornerRadius = CornerRadius(cornerRadius + 4f, cornerRadius + 4f)
+    )
+    drawRoundRect(
+        color = Color.Black.copy(alpha = 0.18f),
+        topLeft = Offset(left - 2f, top + 3f),
+        size = Size(width + 4f, height + 4f),
+        cornerRadius = CornerRadius(cornerRadius + 2f, cornerRadius + 2f)
+    )
+
+    // 2. 메인 fill (22% navy — 카메라 영상이 비침)
+    drawRoundRect(
+        color = Color(0x38101520),
+        topLeft = Offset(left, top),
+        size = Size(width, height),
+        cornerRadius = cr
+    )
+
+    // 3. 상단 ½ specular (위에서 빛 받음)
+    drawRoundRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(AccentCyan.copy(alpha = 0.25f), Color.Transparent),
+            startY = top,
+            endY = top + height * 0.5f
+        ),
+        topLeft = Offset(left, top),
+        size = Size(width, height),
+        cornerRadius = cr
+    )
+
+    // 4. 하단 ½ inner shadow (글래스 두께감)
+    drawRoundRect(
+        brush = Brush.verticalGradient(
+            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.18f)),
+            startY = top + height * 0.5f,
+            endY = top + height
+        ),
+        topLeft = Offset(left, top),
+        size = Size(width, height),
+        cornerRadius = cr
+    )
+
+    // 5. 상단 edge highlight (specular 모서리)
+    drawLine(
+        color = AccentCyan.copy(alpha = 0.55f),
+        start = Offset(left + cornerRadius * 0.6f, top + 0.75f),
+        end = Offset(left + width - cornerRadius * 0.6f, top + 0.75f),
+        strokeWidth = 1.5f
+    )
+
+    // 6. 하단 edge inner line (depth)
+    drawLine(
+        color = Color.Black.copy(alpha = 0.30f),
+        start = Offset(left + cornerRadius * 0.6f, top + height - 0.25f),
+        end = Offset(left + width - cornerRadius * 0.6f, top + height - 0.25f),
+        strokeWidth = 0.5f
+    )
+
+    // 7. 전체 border
+    drawRoundRect(
+        color = AccentCyan.copy(alpha = 0.32f),
+        topLeft = Offset(left, top),
+        size = Size(width, height),
+        cornerRadius = cr,
+        style = Stroke(width = 1f)
+    )
+
+    // 대각선 specular sweep — sweep 위치를 대각선 방향에 매핑해 좁은 highlight 밴드만 보이게.
+    // Brush.linearGradient 는 start→end 축 바깥 영역에 첫/끝 색을 clamp 하므로
+    // 양끝 Transparent 사이에 중앙 cyan 을 두면 [start, end] 구간만 빛난다.
+    val diagonal = width + height
+    val sweepCenter = diagonal * specularSweep
+    val bandHalf = diagonal * 0.12f
+    val unitX = width / diagonal
+    val unitY = height / diagonal
+    val sx = (sweepCenter - bandHalf) * unitX
+    val sy = (sweepCenter - bandHalf) * unitY
+    val ex = (sweepCenter + bandHalf) * unitX
+    val ey = (sweepCenter + bandHalf) * unitY
+    drawRoundRect(
+        brush = Brush.linearGradient(
+            colors = listOf(
+                Color.Transparent,
+                AccentCyan.copy(alpha = 0.18f),
+                Color.Transparent
+            ),
+            start = Offset(left + sx, top + sy),
+            end = Offset(left + ex, top + ey)
+        ),
+        topLeft = Offset(left, top),
+        size = Size(width, height),
+        cornerRadius = cr
+    )
+}
+
 private fun DrawScope.drawLoadingBar(
     cx: Float, cy: Float,
     shimmerProgress: Float,
     textMeasurer: androidx.compose.ui.text.TextMeasurer,
-    dotCycle: Float
+    dotCycle: Float,
+    specularSweep: Float
 ) {
     val barWidth = 220f
     val barHeight = 5f
 
-    // "분석 중" 텍스트 (점 제외)
-    val labelResult = textMeasurer.measure(
-        text = "분석 중",
-        style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium, fontFamily = FontFamily.Monospace, color = AccentCyan)
+    val textShadow = Shadow(
+        color = Color.Black.copy(alpha = 0.65f),
+        offset = Offset(0f, 1.5f),
+        blurRadius = 3f
     )
 
-    // 점 3개 각각 측정 (alpha 다르게 그리기 위해)
+    val labelResult = textMeasurer.measure(
+        text = "분석 중",
+        style = TextStyle(
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            fontFamily = FontFamily.Monospace,
+            color = AccentCyan,
+            shadow = textShadow
+        )
+    )
+
+    // 0→1→2 점이 순차적으로 밝아지도록 alpha 계산
     val dotResults = (0..2).map { i ->
-        // 각 점이 순차적으로 밝아짐: 0번→1번→2번
         val phase = (dotCycle - i * 0.25f).mod(1f)
         val alpha = if (phase < 0.4f) 0.3f + (phase / 0.4f) * 0.7f else 1f - ((phase - 0.4f) / 0.6f) * 0.7f
-        val result = textMeasurer.measure(
+        textMeasurer.measure(
             text = ".",
-            style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, color = AccentCyan.copy(alpha = alpha.coerceIn(0.2f, 1f)))
+            style = TextStyle(
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+                color = AccentCyan.copy(alpha = alpha.coerceIn(0.2f, 1f)),
+                shadow = textShadow
+            )
         )
-        result
     }
     val dotsWidth = dotResults.sumOf { it.size.width }
 
     val totalTextW = labelResult.size.width + dotsWidth + 2f
 
-    // Pill 크기
     val pillPadH = 28f
     val pillPadV = 14f
     val innerGap = 10f
@@ -547,41 +639,8 @@ private fun DrawScope.drawLoadingBar(
     val pillLeft = cx - pillW / 2
     val pillTop = cy - pillH / 2
 
-    // ── 타원형 배경 ──
-    // 외부 글로우
-    drawRoundRect(
-        color = Color.Black.copy(alpha = 0.3f),
-        topLeft = Offset(pillLeft - 4f, pillTop - 4f),
-        size = Size(pillW + 8f, pillH + 8f),
-        cornerRadius = CornerRadius(pillRadius + 4f, pillRadius + 4f)
-    )
-    // 메인 배경
-    drawRoundRect(
-        color = Color(0xE60A0E18),
-        topLeft = Offset(pillLeft, pillTop),
-        size = Size(pillW, pillH),
-        cornerRadius = CornerRadius(pillRadius, pillRadius)
-    )
-    // 상단 하이라이트
-    drawRoundRect(
-        brush = Brush.verticalGradient(
-            listOf(AccentCyan.copy(alpha = 0.06f), Color.Transparent),
-            startY = pillTop, endY = pillTop + pillH * 0.5f
-        ),
-        topLeft = Offset(pillLeft, pillTop),
-        size = Size(pillW, pillH),
-        cornerRadius = CornerRadius(pillRadius, pillRadius)
-    )
-    // 테두리
-    drawRoundRect(
-        color = AccentCyan.copy(alpha = 0.3f),
-        topLeft = Offset(pillLeft, pillTop),
-        size = Size(pillW, pillH),
-        cornerRadius = CornerRadius(pillRadius, pillRadius),
-        style = Stroke(width = 1f)
-    )
+    drawGlassBackground(pillLeft, pillTop, pillW, pillH, pillRadius, specularSweep)
 
-    // ── "분석 중" + 순차 깜박이는 점 ──
     val textStartX = pillLeft + (pillW - totalTextW) / 2
     val textY = pillTop + pillPadV
     drawText(textLayoutResult = labelResult, topLeft = Offset(textStartX, textY))
@@ -592,11 +651,9 @@ private fun DrawScope.drawLoadingBar(
         dotX += dotResult.size.width
     }
 
-    // ── 프로그레스 바 ──
     val barLeft = pillLeft + (pillW - barWidth) / 2
     val barY = textY + labelResult.size.height + innerGap
 
-    // 트랙
     drawRoundRect(
         color = AccentCyan.copy(alpha = 0.12f),
         topLeft = Offset(barLeft, barY),
@@ -604,7 +661,6 @@ private fun DrawScope.drawLoadingBar(
         cornerRadius = CornerRadius(barHeight / 2, barHeight / 2)
     )
 
-    // Shimmer sweep
     val shimmerW = barWidth * 0.3f
     val shimmerStart = barLeft + barWidth * shimmerProgress - shimmerW / 2
     val clampedStart = shimmerStart.coerceIn(barLeft, barLeft + barWidth - shimmerW)
@@ -623,10 +679,6 @@ private fun DrawScope.drawLoadingBar(
         )
     }
 }
-
-// ════════════════════════════════════════════════════════════════
-// 공통 헬퍼
-// ════════════════════════════════════════════════════════════════
 
 private fun DrawScope.drawCornerBrackets(
     left: Float, top: Float, width: Float, height: Float,

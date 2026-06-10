@@ -8,10 +8,6 @@ import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 
-/**
- * 추론 엔진 의존성 주입 모듈.
- * LiteRT-LM(LiteRtLmEngine) 단일 엔진 제공.
- */
 @Module
 @InstallIn(SingletonComponent::class)
 object InferenceModule {

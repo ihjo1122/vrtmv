@@ -1,7 +1,6 @@
 package com.vrtmv.app.ui.intro
 
 import android.app.DownloadManager
-import android.graphics.Bitmap
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -16,22 +15,20 @@ import com.vrtmv.app.domain.model.ModelInfo
 import com.vrtmv.app.domain.model.ModelRegistry
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 sealed class IntroUiState {
-    /** 패치 사항 확인중... */
     data object Checking : IntroUiState()
-
-    /** 최신 상태입니다 */
     data object ModelReady : IntroUiState()
 
-    /** 다운로드 큐의 한 항목을 다운로드하는 중 */
     data class Downloading(
         val currentItemName: String,
         val currentIndex: Int,   // 1-based
@@ -41,35 +38,27 @@ sealed class IntroUiState {
         val totalMB: Int
     ) : IntroUiState()
 
-    /** 다운로드 완료 후 엔진/검출기 초기화 단계 */
     data class Initializing(val message: String) : IntroUiState()
 
-    /**
-     * 다운로드 에러.
-     * @param isCritical true면 VLM 모델 실패처럼 치명적(앱 사용 불가), false면 보조 자산 실패(건너뛰기 가능)
-     */
+    /** isCritical=true 면 VLM 모델 실패처럼 앱 사용 불가, false 면 보조 자산 실패(스킵 가능). */
     data class DownloadError(val message: String, val isCritical: Boolean) : IntroUiState()
 
-    /** 메인 화면으로 이동 가능 */
     data object Ready : IntroUiState()
 }
 
-/**
- * 다운로드 큐 항목. 모델과 자산을 동일 인터페이스로 처리하기 위한 내부 타입.
- */
 private sealed class DownloadItem {
     abstract val displayName: String
     abstract val isCritical: Boolean
 
     data class Model(val info: ModelInfo) : DownloadItem() {
         override val displayName: String = info.displayName
-        // VLM은 앱의 핵심 — 실패 시 치명적
+        // VLM 은 앱의 핵심 — 실패 시 치명적
         override val isCritical: Boolean = true
     }
 
     data class Asset(val info: AssetInfo) : DownloadItem() {
         override val displayName: String = info.displayName
-        // 보조 자산 실패 시 해당 기능만 비활성화되므로 건너뛸 수 있음
+        // 보조 자산 실패 시 해당 기능만 비활성화되므로 스킵 가능
         override val isCritical: Boolean = false
     }
 }
@@ -97,78 +86,76 @@ class IntroViewModel @Inject constructor(
             _uiState.value = IntroUiState.Checking
             val startTime = System.currentTimeMillis()
 
-            // 확인 중 상태를 잠시 보여줌 (브랜딩)
-            delay(800)
+            // 브랜딩 표시 시간을 다운로드 존재 확인과 병렬 실행해 체감 지연 흡수
+            val brandingDelay = launch { delay(500) }
 
-            // 다운로드 순서: VLM(치명적) → YOLO(보조) → 제스처(보조)
+            // VLM(치명적) → YOLO(보조)
             val queue: List<DownloadItem> = listOf(
                 DownloadItem.Model(ModelRegistry.getDefaultModel()),
-                DownloadItem.Asset(AssetRegistry.YOLO),
-                DownloadItem.Asset(AssetRegistry.GESTURE)
+                DownloadItem.Asset(AssetRegistry.YOLO)
             )
+
+            val existsFlags = coroutineScope {
+                queue.map { item ->
+                    async(Dispatchers.IO) {
+                        when (item) {
+                            is DownloadItem.Model -> modelDownloadManager.modelExists(item.info)
+                            is DownloadItem.Asset -> modelDownloadManager.assetExists(item.info)
+                        }
+                    }
+                }.awaitAll()
+            }
 
             val total = queue.size
             for ((index, item) in queue.withIndex()) {
-                val exists = when (item) {
-                    is DownloadItem.Model -> modelDownloadManager.modelExists(item.info)
-                    is DownloadItem.Asset -> modelDownloadManager.assetExists(item.info)
-                }
-                if (exists) {
+                if (existsFlags[index]) {
                     Log.d(TAG, "이미 존재: ${item.displayName}")
                     continue
                 }
 
                 val ok = downloadSingleItem(item, currentIndex = index + 1, total = total)
-                if (!ok && item.isCritical) {
-                    // 치명적 실패 — 에러 상태에 머물고 retry 대기
-                    return@launch
-                }
-                // 비치명적 실패는 다음 항목으로 진행
+                if (!ok && item.isCritical) return@launch
             }
 
-            // 다운로드 완료 → 엔진/검출기 초기화
+            brandingDelay.join()
+
             val initOk = runInitialization()
-            if (!initOk) {
-                // VLM 로드 실패 시 DownloadError 상태 유지 (runInitialization 내부에서 세팅됨)
-                return@launch
-            }
+            if (!initOk) return@launch
 
-            // 모두 완료(또는 스킵)
             _uiState.value = IntroUiState.ModelReady
+            // 빠른 케이스에서도 ModelReady 상태가 잠깐은 보이도록 800ms 최소 노출
             val elapsed = System.currentTimeMillis() - startTime
-            val remaining = 1500 - elapsed
+            val remaining = 800 - elapsed
             if (remaining > 0) delay(remaining)
             _uiState.value = IntroUiState.Ready
         }
     }
 
-    /**
-     * VLM 모델 로드 + 워밍업 + 검출기 선행 초기화.
-     * 기존 CameraViewModel.init의 로딩 로직을 Intro로 이관해 Camera 진입 지연 제거.
-     *
-     * @return VLM 로드 성공 여부. 검출기 실패는 비치명적으로 간주하고 true 유지.
-     */
+    /** VLM(1~3초) 과 검출기(0.5~1.3초) 가 독립이라 병렬 실행해 누적 시간 단축. */
     private suspend fun runInitialization(): Boolean {
-        _uiState.value = IntroUiState.Initializing("VLM 모델 로딩 중")
+        _uiState.value = IntroUiState.Initializing("모델·검출기 준비 중")
 
         val modelInfo = ModelRegistry.getDefaultModel()
-        val vlmOk = try {
-            val success = inferenceEngine.loadModel(modelInfo)
-            if (success) {
-                // 1x1 워밍업 — GPU 셰이더 컴파일 및 KV 캐시 초기화
+
+        val (vlmOk, _) = coroutineScope {
+            val vlmDeferred = async(Dispatchers.IO) {
                 try {
-                    val warmup = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
-                    inferenceEngine.describeScene(warmup)
-                    warmup.recycle()
-                    Log.d(TAG, "VLM 워밍업 완료")
+                    inferenceEngine.loadModel(modelInfo)
                 } catch (e: Exception) {
-                    Log.w(TAG, "VLM 워밍업 중 오류 (무시): ${e.message}")
+                    Log.e(TAG, "VLM 로드 중 예외", e)
+                    false
                 }
             }
-            success
-        } catch (e: Exception) {
-            Log.e(TAG, "VLM 로드 중 예외", e)
-            false
+            val detectorsDeferred = async(Dispatchers.IO) {
+                try {
+                    detectionProviderRegistry.initAll()
+                    true
+                } catch (e: Exception) {
+                    Log.w(TAG, "검출기 초기화 일부 실패", e)
+                    false
+                }
+            }
+            vlmDeferred.await() to detectorsDeferred.await()
         }
 
         if (!vlmOk) {
@@ -179,23 +166,9 @@ class IntroViewModel @Inject constructor(
             return false
         }
 
-        // 검출기 선행 초기화 (MediaPipe + YOLO) — 실패는 비치명적
-        _uiState.value = IntroUiState.Initializing("검출기 준비 중")
-        withContext(Dispatchers.IO) {
-            try {
-                detectionProviderRegistry.initAll()
-            } catch (e: Exception) {
-                Log.w(TAG, "검출기 초기화 일부 실패", e)
-            }
-        }
-
         return true
     }
 
-    /**
-     * 큐의 한 항목을 다운로드한다.
-     * @return 성공 시 true, 실패 시 false (UI 상태는 실패 시 [DownloadError]로 세팅)
-     */
     private suspend fun downloadSingleItem(
         item: DownloadItem,
         currentIndex: Int,
@@ -237,9 +210,9 @@ class IntroViewModel @Inject constructor(
             }
             succeeded
         } catch (e: ManualInstallRequiredException) {
-            // downloadUrl이 비어있는 모델 — 오직 VLM 모델에서만 발생. Ready로 바로 통과
+            // VLM 의 downloadUrl 이 비어있는 경우 — ModelPathResolver 가 수동 배치 경로 탐색
             Log.w(TAG, "수동 배치 필요: ${item.displayName}")
-            true  // 스킵으로 처리 — ModelPathResolver가 수동 배치 경로를 탐색
+            true
         } catch (e: Exception) {
             Log.e(TAG, "${item.displayName} 다운로드 중 예외", e)
             _uiState.value = IntroUiState.DownloadError(
@@ -262,7 +235,6 @@ class IntroViewModel @Inject constructor(
         checkAndPrepareAll()
     }
 
-    /** 건너뛰고 Ready로 진행 — 비치명적 오류 또는 사용자 명시 스킵 */
     fun skip() {
         _uiState.value = IntroUiState.Ready
     }

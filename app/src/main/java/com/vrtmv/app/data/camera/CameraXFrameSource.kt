@@ -17,17 +17,6 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-/**
- * CameraX 기반 [FrameSource] 구현.
- *
- * 단일 ImageAnalysis 분석기에서 매 프레임을 upright Bitmap으로 변환한 뒤
- * 모든 등록 리스너에 순차 디스패치한다. 콜백 종료 시 비트맵 recycle.
- *
- * 기존 `CameraScreen` 의 카메라 바인딩 코드를 이 클래스로 이전했다 — 검출기/제스처
- * 모듈은 더는 ImageProxy 를 직접 알지 못한다.
- *
- * 렌더링 뷰([PreviewView])는 내부에서 생성·소유한다 — 호출자는 [view] 게터로 접근.
- */
 class CameraXFrameSource(private val context: Context) : FrameSource {
 
     private val previewView: PreviewView = PreviewView(context).apply {
@@ -62,6 +51,8 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
                 it.surfaceProvider = previewView.surfaceProvider
             }
 
+            // setTargetResolution 은 1.4 에서 deprecated 지만 ResolutionSelector 가 일부 기기에서
+            // RGBA_8888 출력 형식과 충돌해 폴백 필요 — 호환성 우선해 명시적으로 deprecation 억제.
             @Suppress("DEPRECATION")
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -85,7 +76,6 @@ class CameraXFrameSource(private val context: Context) : FrameSource {
         }, ContextCompat.getMainExecutor(context))
     }
 
-    /** Analyzer 콜백 — 분석 스레드에서 실행됨. */
     private fun dispatchFrame(imageProxy: ImageProxy) {
         if (closed) {
             imageProxy.close()

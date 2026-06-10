@@ -7,34 +7,32 @@ import android.util.Log
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.SamplerConfig
+import com.vrtmv.app.data.recording.DescriptionResult
+import com.vrtmv.app.data.recording.VlmTimings
 import com.vrtmv.app.domain.model.ModelInfo
 import com.vrtmv.app.util.ModelPathResolver
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * LiteRT-LM 기반 온디바이스 추론 엔진.
- * Gemma 3n E2B-IT 등 .litertlm 멀티모달 모델을 로드하여 이미지+텍스트 추론을 수행한다.
- *
- * 운영 축:
- *   1) 백엔드 프로파일: [BackendProfile] 로 GPU/CPU 분배를 전환한다. 로드 시점에만
- *      반영돼 세션 중 재초기화 비용을 피한다. PowerManager thermal/저전력 상태에 따라
- *      자동 강등된다.
- *   2) 프롬프트 기반 출력 길이 제약으로 decode 토큰 수를 줄인다 (PromptBuilder).
- *
- * 유휴 언로드는 LiteRT-LM 0.10.0이 `Engine.close()` 후 재초기화를 안정적으로 지원하는지
- * 검증되지 않아 현재 비활성화. 메모리 회수는 화면 이탈 시 [release]로만 수행한다.
+ * LiteRT-LM 0.11.0 기반 온디바이스 멀티모달 엔진 (Gemma 4 MTP).
+ * [BackendProfile] 로 GPU/CPU 분배를 전환하며 PowerManager thermal/저전력 상태에
+ * 따라 런타임 강등된다.
  */
 @Singleton
 class LiteRtLmEngine @Inject constructor(
@@ -45,19 +43,16 @@ class LiteRtLmEngine @Inject constructor(
     companion object {
         private const val TAG = "LiteRtLm"
 
-        // 전체 컨텍스트 토큰 예산 (입력 이미지 토큰 + 프롬프트 + 출력 포함).
-        // LiteRT-LM `EngineConfig.maxNumTokens`는 전체 컨텍스트 길이이고,
-        // 0.10.0 API에는 별도의 output token 한도가 없음 — 출력은 EOS/cancel로만 종료.
-        // 실측(S23 Ultra, Gemma 3n E2B int4): 512 유지가 최적.
+        // 전체 컨텍스트 토큰 예산. litertlm 0.11.0 API 에도 별도 출력 한도가 없어 EOS/cancel 로만 종료.
         private const val MAX_CONTEXT_TOKENS = 512
 
-        // VLM 입력 이미지 최대 변 — Gemma 3n 비전 인코더 내부 해상도(256px)에 맞춤
+        // Gemma 4 비전 인코더 입력 해상도 (Gemma 3n 와 동일 256px, 다르면 실측 후 조정)
         private const val VLM_IMAGE_MAX_DIM = 256
 
-        // JPEG 품질 — 온디바이스 추론이므로 전송 비용 없음. 세부 특징 보존을 위해 75 유지
-        private const val VLM_JPEG_QUALITY = 75
+        // 256px 작은 입력에서 JPEG 75 의 8x8 블록 아티팩트가 휴지심 구멍·주름 같은
+        // 변별 단서를 지워 오인식(흰 원통→"테이프")을 유발하므로 90 으로 상향.
+        private const val VLM_JPEG_QUALITY = 90
 
-        // 그리디 디코딩용 샘플러 설정 (topK=1은 temperature 무시)
         private val GREEDY_SAMPLER = SamplerConfig(
             /* topK = */ 1,
             /* topP = */ 1.0,
@@ -66,7 +61,6 @@ class LiteRtLmEngine @Inject constructor(
         )
     }
 
-    /** 엔진 로드 상태 */
     sealed class LoadState {
         data object NotLoaded : LoadState()
         data object Ready : LoadState()
@@ -75,12 +69,13 @@ class LiteRtLmEngine @Inject constructor(
     }
 
     /**
-     * 백엔드 프로파일. 속도/발열 트레이드오프를 명시적으로 선택.
-     *
+     * 백엔드 프로파일. 속도/발열 트레이드오프를 명시 선택.
      * - [PERFORMANCE]: 디코더·비전 모두 GPU. 최고 속도, 최고 발열.
-     * - [BALANCED]:   CPU 디코더 + GPU 비전. prefill(비전 토큰 지배)은 GPU로 빠르게,
-     *                 decode는 CPU로 발열을 낮춘다. 속도 손실 ~1-2초.
-     * - [COOL]:       전체 CPU. 가장 낮은 발열, 가장 느린 응답.
+     * - [BALANCED]:   CPU 디코더 + GPU 비전. prefill(비전 토큰 지배)은 GPU 로 빠르게,
+     *                 decode 는 CPU 로 발열 완화. 속도 손실 ~1-2초.
+     * - [COOL]:       Gemma 4 도 vision 백엔드로 GPU 를 강제(`Vision backend constraint mismatch`)
+     *                 하는 경우가 많아 vision=CPU 는 사용 불가로 가정 — 현실에선 BALANCED 와 동일.
+     *                 (모델이 vision=CPU 를 허용하면 폴백 시퀀스에서 자동으로 채택됨.)
      */
     enum class BackendProfile { PERFORMANCE, BALANCED, COOL }
 
@@ -92,16 +87,13 @@ class LiteRtLmEngine @Inject constructor(
     private var loadState: LoadState = LoadState.NotLoaded
     private val mutex = Mutex()
 
-    /** 사용자 지정 프로파일. thermal/저전력 상태에 따라 런타임에 강등될 수 있다. */
     @Volatile
     private var requestedProfile: BackendProfile = BackendProfile.PERFORMANCE
 
-    /** 외부에서 프로파일 변경. 즉시 반영하려면 다음 로드에서 적용되므로 엔진을 해제한다. */
     fun setBackendProfile(profile: BackendProfile) {
         if (profile == requestedProfile) return
         requestedProfile = profile
         Log.i(TAG, "프로파일 변경 요청: $profile → 다음 로드에서 적용")
-        // 동기적으로 엔진 해제(다음 ensureLoaded가 새 프로파일로 로드)
         synchronized(this) {
             engine?.let {
                 try { it.close() } catch (_: Exception) {}
@@ -112,10 +104,6 @@ class LiteRtLmEngine @Inject constructor(
         }
     }
 
-    /**
-     * PowerManager 상태를 읽어 유효 프로파일을 결정한다.
-     * 저전력 모드 → BALANCED, thermal SEVERE+ → COOL, MODERATE → BALANCED.
-     */
     private fun effectiveProfile(): BackendProfile {
         return try {
             val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
@@ -142,7 +130,6 @@ class LiteRtLmEngine @Inject constructor(
         }
     }
 
-    /** 프로파일별 EngineConfig 팩토리 */
     private fun buildConfig(modelPath: String, profile: BackendProfile, cacheDirPath: String): EngineConfig {
         return when (profile) {
             BackendProfile.PERFORMANCE -> EngineConfig(
@@ -164,7 +151,7 @@ class LiteRtLmEngine @Inject constructor(
             BackendProfile.COOL -> EngineConfig(
                 modelPath = modelPath,
                 backend = Backend.CPU(),
-                visionBackend = Backend.CPU(),
+                visionBackend = Backend.GPU(),  // Gemma 4 vision 도 GPU 우선 — CPU 면 로드 실패 가능
                 audioBackend = Backend.CPU(),
                 maxNumTokens = MAX_CONTEXT_TOKENS,
                 cacheDir = cacheDirPath
@@ -195,7 +182,8 @@ class LiteRtLmEngine @Inject constructor(
             Log.i(TAG, "로드 시작: ${modelInfo.displayName}, 프로파일=$targetProfile")
 
             try {
-                // 요청 프로파일 → 실패 시 더 보수적인 쪽으로 폴백
+                // 어떤 시작점이든 vision=GPU 옵션을 최소 1회는 시도 — 모델이 vision GPU 강제일 때
+                // 첫 시도가 실패해도 전체 로드가 무산되지 않도록.
                 val profiles = when (targetProfile) {
                     BackendProfile.PERFORMANCE -> listOf(
                         BackendProfile.PERFORMANCE,
@@ -204,9 +192,14 @@ class LiteRtLmEngine @Inject constructor(
                     )
                     BackendProfile.BALANCED -> listOf(
                         BackendProfile.BALANCED,
-                        BackendProfile.COOL
+                        BackendProfile.COOL,
+                        BackendProfile.PERFORMANCE
                     )
-                    BackendProfile.COOL -> listOf(BackendProfile.COOL)
+                    BackendProfile.COOL -> listOf(
+                        BackendProfile.COOL,
+                        BackendProfile.BALANCED,
+                        BackendProfile.PERFORMANCE
+                    )
                 }
 
                 var lastError: Exception? = null
@@ -243,11 +236,6 @@ class LiteRtLmEngine @Inject constructor(
         }
     }
 
-    /**
-     * 유휴 언로드 후에도 이전에 로드한 모델을 재로드한다.
-     * - 이미 로드돼 있으면 즉시 true.
-     * - [lastModelInfo] 가 없으면(최초 호출 전) false.
-     */
     override suspend fun ensureLoaded(): Boolean {
         if (engine != null) return true
         val info = lastModelInfo ?: run {
@@ -261,101 +249,178 @@ class LiteRtLmEngine @Inject constructor(
     fun getCurrentModelId(): String? = currentModelId
     fun getActiveBackend(): String = activeBackend
 
-    /** 모든 추론 경로 공통 fallback — "X이(가) 감지되었습니다" 같은 trivial 텍스트 제거. */
+    // "X이(가) 감지되었습니다" 같은 trivial 텍스트 대신 사용자에게 보여줄 공통 fallback.
     private val commonFallback = "설명을 불러오지 못했습니다. 다시 시도해 주세요."
 
-    override suspend fun describe(image: Bitmap, label: String, confidence: Float): String {
-        val prompt = PromptBuilder.buildVisionPrompt(label)
-        return infer(image, prompt, commonFallback)
+    override suspend fun describe(image: Bitmap, label: String, confidence: Float): DescriptionResult {
+        val prompt = PromptBuilder.buildVisionPrompt()
+        return infer(image, prompt, commonFallback, resizeImage = true, keepFirstSentenceOnly = true)
     }
 
-    override suspend fun describeScene(image: Bitmap): String {
+    override suspend fun describeScene(image: Bitmap): DescriptionResult {
         val prompt = PromptBuilder.buildScenePrompt()
-        return infer(image, prompt, commonFallback)
+        // 다운스케일은 시야를 자르지 않고 픽셀 밀도만 줄이므로 풀프레임 의도와 충돌 없음.
+        // 풀프레임(640x480)을 그대로 보내면 비전 토큰이 폭증해 prefill 이 수 초 길어진다.
+        return infer(image, prompt, commonFallback, resizeImage = true, keepFirstSentenceOnly = false)
     }
 
-    private suspend fun infer(image: Bitmap, prompt: String, fallback: String): String {
-        val result = mutex.withLock {
-            withContext(Dispatchers.IO) {
-                val currentEngine = engine
-                if (currentEngine == null) {
-                    return@withContext when (val s = loadState) {
-                        LoadState.FileMissing ->
-                            "모델 파일을 찾을 수 없습니다. 앱을 재시작해 다운로드를 확인해 주세요."
-                        is LoadState.Failed ->
-                            "모델 초기화 실패: ${s.reason}"
-                        LoadState.NotLoaded ->
-                            "모델이 아직 로드되지 않았습니다."
-                        LoadState.Ready ->
-                            fallback  // race condition — "설명을 불러오지 못했습니다"
-                    }
-                }
+    private fun emptyResult(text: String): DescriptionResult =
+        DescriptionResult(text = text, timings = VlmTimings(0L, 0L, 0L, 0L), inputWidth = 0, inputHeight = 0)
 
-                try {
-                    val t0 = System.currentTimeMillis()
-                    val resized = resizeForVlm(image)
-                    val imageBytes = bitmapToJpegBytes(resized)
-                    if (resized != image) resized.recycle()
-                    val t1 = System.currentTimeMillis()
+    private suspend fun infer(
+        image: Bitmap,
+        prompt: String,
+        fallback: String,
+        resizeImage: Boolean,
+        keepFirstSentenceOnly: Boolean
+    ): DescriptionResult = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            inferLocked(image, prompt, fallback, resizeImage, keepFirstSentenceOnly, allowBackendDowngrade = true)
+        }
+    }
 
-                    val convConfig = ConversationConfig(samplerConfig = GREEDY_SAMPLER)
-                    currentEngine.createConversation(convConfig).use { conversation ->
-                        val t2 = System.currentTimeMillis()
-                        val message = Message.user(
-                            Contents.of(
-                                Content.ImageBytes(imageBytes),
-                                Content.Text(prompt)
-                            )
-                        )
-
-                        // 동기 sendMessage — 검증된 경로. 길이 단축은 PromptBuilder 프롬프트 제약으로 유도.
-                        // (이전에 스트리밍+cancelProcess 조기 종료를 시도했으나 Flow 의미론이 불명확해
-                        //  응답이 빈 문자열로 수집되어 fallback이 반환되는 문제 발생 → 동기 방식 복귀)
-                        val response = conversation.sendMessage(message)
-                        val rawText = response.contents.contents
-                            .filterIsInstance<Content.Text>()
-                            .joinToString("") { it.text }
-
-                        val t3 = System.currentTimeMillis()
-                        val cleaned = PromptBuilder.cleanResponse(rawText)
-                        Log.i(
-                            TAG,
-                            "▶ 추론 완료 총=${t3 - t0}ms " +
-                                "(preprocess=${t1 - t0}ms, createConv=${t2 - t1}ms, sendMessage=${t3 - t2}ms), " +
-                                "원본=${rawText.length}자 → 정제=${cleaned.length}자"
-                        )
-                        Log.d(TAG, "원본: '${rawText.replace("\n", " ")}' → 정제: '$cleaned'")
-                        // 정제가 모든 내용을 제거한 경우 → 원문이 할루시네이션(loop) 이면 fallback,
-                        // 아니면 원문을 살려서 보여줌.
-                        when {
-                            cleaned.isNotEmpty() -> cleaned
-                            rawText.isBlank() -> fallback
-                            PromptBuilder.isLoopyHallucination(rawText) -> {
-                                Log.w(TAG, "반복 할루시네이션 감지 — fallback 사용")
-                                fallback
-                            }
-                            else -> {
-                                Log.w(TAG, "정제 결과 비어있음 — 원문 사용")
-                                rawText.trim().take(80)
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "추론 실패", e)
-                    "추론 실패: ${e.message}"
-                }
+    /** [mutex] 보유 상태에서만 호출. invoke 실패 시 1회 백엔드 강등 후 재시도. */
+    private suspend fun inferLocked(
+        image: Bitmap,
+        prompt: String,
+        fallback: String,
+        resizeImage: Boolean,
+        keepFirstSentenceOnly: Boolean,
+        allowBackendDowngrade: Boolean
+    ): DescriptionResult {
+        val currentEngine = engine
+        if (currentEngine == null) {
+            return when (val s = loadState) {
+                LoadState.FileMissing ->
+                    emptyResult("모델 파일을 찾을 수 없습니다. 앱을 재시작해 다운로드를 확인해 주세요.")
+                is LoadState.Failed ->
+                    emptyResult("모델 초기화 실패: ${s.reason}")
+                LoadState.NotLoaded ->
+                    emptyResult("모델이 아직 로드되지 않았습니다.")
+                LoadState.Ready ->
+                    emptyResult(fallback)  // race: Ready 인데 engine null — 호출 직전 release 와 경합
             }
         }
 
-        return result
+        try {
+            val t0 = System.currentTimeMillis()
+            val resized = if (resizeImage) resizeForVlm(image) else image
+            val resizedW = resized.width
+            val resizedH = resized.height
+            val imageBytes = bitmapToJpegBytes(resized)
+            if (resized != image) resized.recycle()
+            val t1 = System.currentTimeMillis()
+
+            val convConfig = ConversationConfig(samplerConfig = GREEDY_SAMPLER)
+            return currentEngine.createConversation(convConfig).use { conversation ->
+                val t2 = System.currentTimeMillis()
+                val message = Message.user(
+                    Contents.of(
+                        Content.ImageBytes(imageBytes),
+                        Content.Text(prompt)
+                    )
+                )
+
+                val rawText = streamWithEarlyLoopCancel(conversation, message)
+
+                val t3 = System.currentTimeMillis()
+                val cleaned = PromptBuilder.cleanResponse(
+                    rawText,
+                    keepFirstSentenceOnly = keepFirstSentenceOnly
+                )
+                Log.i(
+                    TAG,
+                    "▶ 추론 완료 총=${t3 - t0}ms " +
+                        "(preprocess=${t1 - t0}ms, createConv=${t2 - t1}ms, sendMessage=${t3 - t2}ms), " +
+                        "원본=${rawText.length}자 → 정제=${cleaned.length}자"
+                )
+                Log.d(TAG, "원본: '${rawText.replace("\n", " ")}' → 정제: '$cleaned'")
+                val text = when {
+                    cleaned.isNotEmpty() -> cleaned
+                    rawText.isBlank() -> fallback
+                    PromptBuilder.isLoopyHallucination(rawText) -> {
+                        Log.w(TAG, "반복 할루시네이션 감지 — fallback 사용")
+                        fallback
+                    }
+                    else -> {
+                        Log.w(TAG, "정제 결과 비어있음 — 원문 사용")
+                        rawText.trim().take(80)
+                    }
+                }
+                DescriptionResult(
+                    text = text,
+                    timings = VlmTimings(
+                        preprocessMs = t1 - t0,
+                        createConvMs = t2 - t1,
+                        sendMessageMs = t3 - t2,
+                        totalMs = t3 - t0
+                    ),
+                    inputWidth = resizedW,
+                    inputHeight = resizedH
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "추론 실패 (activeBackend=$activeBackend, allowDowngrade=$allowBackendDowngrade)", e)
+            if (allowBackendDowngrade && isInvokeFailure(e)) {
+                val info = lastModelInfo
+                val nextProfile = nextBackendDowngrade(activeBackend)
+                if (info != null && nextProfile != null) {
+                    Log.w(TAG, "invoke 실패 → 백엔드 강등 ($activeBackend → $nextProfile) 후 재로드/재시도")
+                    val reloaded = reloadWithProfileLocked(info, nextProfile)
+                    if (reloaded) {
+                        return inferLocked(image, prompt, fallback, resizeImage, keepFirstSentenceOnly, allowBackendDowngrade = false)
+                    } else {
+                        Log.w(TAG, "강등 재로드 실패 — 에러 메시지 반환")
+                    }
+                }
+            }
+            return emptyResult("추론 실패: ${e.message}")
+        }
     }
 
-    override fun isAvailable(): Boolean {
-        if (modelAvailable != null) return modelAvailable!!
-        return true
+    /** invoke 단계 실패(컴파일 그래프 invoke / 백엔드 호환성)로 보이는 예외만 강등 대상. */
+    private fun isInvokeFailure(e: Exception): Boolean {
+        val msg = (e.message ?: "").lowercase()
+        return msg.contains("invoke") || msg.contains("status code: 13") ||
+            msg.contains("compiled model") || msg.contains("gpu")
     }
 
-    /** 명시적 해제 (카메라 화면 종료 시) */
+    /** PERFORMANCE → BALANCED → COOL 순서. 이미 COOL 이면 null. */
+    private fun nextBackendDowngrade(current: String): BackendProfile? = when (current) {
+        BackendProfile.PERFORMANCE.name -> BackendProfile.BALANCED
+        BackendProfile.BALANCED.name -> BackendProfile.COOL
+        else -> null
+    }
+
+    /** [mutex] 보유 상태에서만 호출. 현재 엔진을 release 하고 명시 프로파일로 재로드. */
+    private fun reloadWithProfileLocked(modelInfo: ModelInfo, profile: BackendProfile): Boolean {
+        val modelPath = pathResolver.findModelPath(modelInfo) ?: run {
+            loadState = LoadState.FileMissing
+            modelAvailable = false
+            return false
+        }
+        releaseInternalLocked()
+        val cacheDirPath = context.cacheDir.absolutePath
+        return try {
+            val cfg = buildConfig(modelPath, profile, cacheDirPath)
+            val e = Engine(cfg).also { it.initialize() }
+            engine = e
+            currentModelId = modelInfo.id
+            modelAvailable = true
+            activeBackend = profile.name
+            loadState = LoadState.Ready
+            Log.i(TAG, "강등 재로드 완료: profile=$profile")
+            true
+        } catch (ex: Exception) {
+            Log.e(TAG, "강등 재로드 실패 (profile=$profile)", ex)
+            loadState = LoadState.Failed(ex.message ?: "강등 재로드 실패")
+            modelAvailable = false
+            false
+        }
+    }
+
+    override fun isAvailable(): Boolean = modelAvailable ?: true
+
     override fun release() {
         synchronized(this) {
             try { engine?.close() } catch (e: Exception) { Log.w(TAG, "엔진 해제 중 오류", e) }
@@ -364,11 +429,10 @@ class LiteRtLmEngine @Inject constructor(
             modelAvailable = null
             activeBackend = "unknown"
             loadState = LoadState.NotLoaded
-            // lastModelInfo는 유지 — 이후 ensureLoaded로 재사용 가능
+            // lastModelInfo 는 의도적 보존 — 이후 ensureLoaded 로 재로드 가능
         }
     }
 
-    /** mutex 이미 보유 상태에서 호출 */
     private fun releaseInternalLocked() {
         try { engine?.close() } catch (e: Exception) { Log.w(TAG, "엔진 해제 중 오류", e) }
         engine = null
@@ -376,6 +440,77 @@ class LiteRtLmEngine @Inject constructor(
         modelAvailable = null
         activeBackend = "unknown"
         loadState = LoadState.NotLoaded
+    }
+
+    /**
+     * 스트리밍 추론 + 루프 할루시네이션 조기 cancel.
+     *
+     * litertlm 0.11.0 의 `sendMessageAsync` 콜백 변형은 partial Message 가 누적인지
+     * 단편인지 SDK 명세가 모호하므로, 새 텍스트가 직전 누적의 prefix 면 교체 / 아니면 append.
+     *
+     * 누적 32자 마다 [PromptBuilder.isLoopyHallucination] 검사 → true 면 즉시 cancelProcess.
+     * 정상 응답(~30~80자)은 1~2회 안에 검사를 통과한다. 12초 타임아웃은 isLoopyHallucination
+     * 가 못 잡은 패턴 루프의 worst case 차단용 — 정상 추론은 충분히 안에 끝난다.
+     */
+    private suspend fun streamWithEarlyLoopCancel(
+        conversation: Conversation,
+        message: Message,
+        timeoutMs: Long = 12_000
+    ): String {
+        val deferred = CompletableDeferred<String>()
+        val accumulated = StringBuilder()
+        var loopCheckedAt = 0
+        var cancelled = false
+
+        val callback = object : MessageCallback {
+            override fun onMessage(message: Message) {
+                if (cancelled) return
+                val text = message.contents.contents
+                    .filterIsInstance<Content.Text>()
+                    .joinToString("") { it.text }
+                if (text.isEmpty()) return
+
+                if (text.length >= accumulated.length && text.startsWith(accumulated.toString())) {
+                    accumulated.setLength(0)
+                    accumulated.append(text)
+                } else {
+                    accumulated.append(text)
+                }
+
+                if (accumulated.length >= loopCheckedAt + 32) {
+                    loopCheckedAt = accumulated.length
+                    if (PromptBuilder.isLoopyHallucination(accumulated.toString())) {
+                        cancelled = true
+                        Log.w(TAG, "스트리밍 중 루프 감지 → cancelProcess (누적=${accumulated.length}자)")
+                        try { conversation.cancelProcess() } catch (e: Exception) {
+                            Log.w(TAG, "cancelProcess 실패", e)
+                        }
+                        deferred.complete(accumulated.toString())
+                    }
+                }
+            }
+
+            override fun onDone() {
+                deferred.complete(accumulated.toString())
+            }
+
+            override fun onError(t: Throwable) {
+                if (cancelled) {
+                    deferred.complete(accumulated.toString())
+                } else {
+                    deferred.completeExceptionally(t)
+                }
+            }
+        }
+
+        conversation.sendMessageAsync(message, callback, emptyMap<String, Any>())
+
+        return withTimeoutOrNull(timeoutMs) { deferred.await() }
+            ?: run {
+                Log.w(TAG, "스트리밍 추론 timeout (${timeoutMs}ms) → cancelProcess")
+                try { conversation.cancelProcess() } catch (_: Exception) {}
+                accumulated.toString()
+            }
     }
 
     private fun resizeForVlm(bitmap: Bitmap, maxDim: Int = VLM_IMAGE_MAX_DIM): Bitmap {
